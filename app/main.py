@@ -94,10 +94,13 @@ async def health():
 
 
 PREFIX = "/api/v1"
+# IMPORTANT: quiz and coverage must be registered BEFORE the generic /{lang}/...
+# routers (verses, books, search, audio).  FastAPI uses first-match routing, so
+# specific prefixes (/quiz/*, /coverage/*) must win over wildcard /{lang}/*.
 app.include_router(languages.router, prefix=PREFIX)
-app.include_router(books.router, prefix=PREFIX)
-app.include_router(verses.router, prefix=PREFIX)
-app.include_router(search.router, prefix=PREFIX)
-app.include_router(audio.router, prefix=PREFIX)
 app.include_router(coverage.router, prefix=PREFIX)
-app.include_router(quiz.router, prefix=PREFIX)
+app.include_router(quiz.router,      prefix=PREFIX)
+app.include_router(books.router,     prefix=PREFIX)
+app.include_router(verses.router,    prefix=PREFIX)
+app.include_router(search.router,    prefix=PREFIX)
+app.include_router(audio.router,     prefix=PREFIX)
