@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
-from app.routers import languages, books, verses, search, audio, coverage
+from app.routers import languages, books, verses, search, audio, coverage, quiz
 
 app = FastAPI(
     title=settings.api_title,
@@ -78,6 +78,12 @@ async def root():
             "audio_info": "/api/v1/{lang}/audio/{book}/{chapter}/info",
             "coverage": "/api/v1/coverage",
             "coverage_lang": "/api/v1/coverage/{lang}",
+            "quiz_chapter": "/api/v1/quiz/{lang}/books/{book}/{chapter}",
+            "quiz_verse": "/api/v1/quiz/{lang}/books/{book}/{chapter}/{verse}",
+            "quiz_random": "/api/v1/quiz/random",
+            "quiz_generate": "POST /api/v1/quiz/generate",
+            "quiz_answer": "POST /api/v1/quiz/answer",
+            "quiz_stats": "/api/v1/quiz/stats",
         },
     })
 
@@ -94,3 +100,4 @@ app.include_router(verses.router, prefix=PREFIX)
 app.include_router(search.router, prefix=PREFIX)
 app.include_router(audio.router, prefix=PREFIX)
 app.include_router(coverage.router, prefix=PREFIX)
+app.include_router(quiz.router, prefix=PREFIX)
