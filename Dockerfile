@@ -7,9 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 COPY scripts/ scripts/
-
-# data/ is mounted as a volume; pre-create it
-RUN mkdir -p data
+COPY data/bible.db data/bible.db
 
 EXPOSE 8000
 
