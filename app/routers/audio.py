@@ -138,7 +138,10 @@ def _build_audio_url(lang: str, abbr: str, chapter: int) -> tuple[str | None, st
     if lang == "en":
         if abbr in ESV_BOOKS:
             url = f"https://audio.esv.org/hw/mq/{abbr}.{chapter}.mp3"
-            return url, "ESV Audio Bible (audio.esv.org)"
+            # NOTE: text is KJV but no free per-chapter KJV audio exists.
+            # ESV follows identical chapter/verse structure to KJV but uses
+            # modern wording — suitable for listening but not word-sync.
+            return url, "ESV Audio Bible (audio.esv.org) — audio is ESV, text is KJV"
         return None, None
 
     return None, None
@@ -172,13 +175,53 @@ async def audio_info(lang: str, book: str, chapter: int):
             },
         )
 
-    coverage = {
-        "am": "Full Bible (OT + NT) — missing Malachi (OT) and Luke (NT)",
-        "or": "New Testament only",
-        "ti": "New Testament only",
-        "en": "Full Bible (OT + NT) — ESV audio (text is KJV)",
+    # Per-language metadata for iOS clients to handle mismatches gracefully
+    LANG_META = {
+        "am": {
+            "coverage": "Full Bible (OT + NT) — missing Malachi and Luke",
+            "text_version": "Amharic Bible (1954/1962 Ethiopian Protestant)",
+            "audio_version": "Amharic Bible reading by Paulos Haileselassie (JEC, 2005)",
+            "text_audio_match": True,
+            "versification": "ethiopian",
+            "versification_note": (
+                "The Amharic Bible combines some KJV verse pairs into one. "
+                "Verse numbers may differ from KJV by 1-2 in some chapters "
+                "(e.g. John 3 has 34 verses in Amharic vs 36 in KJV)."
+            ),
+        },
+        "or": {
+            "coverage": "New Testament only (27 books, 260 chapters)",
+            "text_version": "MACQUL — Macaafa Qulqulluu (Bible Society of Ethiopia)",
+            "audio_version": "FCBH Oromo NT (Faith Comes By Hearing)",
+            "text_audio_match": True,
+            "versification": "standard",
+            "versification_note": "Verse numbers match KJV/standard versification.",
+        },
+        "ti": {
+            "coverage": "New Testament only (27 books, 260 chapters)",
+            "text_version": "Tigrigna Bible (geezexperience.com)",
+            "audio_version": "FCBH Tigrigna NT (Faith Comes By Hearing)",
+            "text_audio_match": None,  # unverified — may differ
+            "versification": "ethiopian",
+            "versification_note": (
+                "Tigrigna text combines some verses (e.g. Romans 8 has 32 verses "
+                "vs 39 in KJV). Audio translation may differ from text source."
+            ),
+        },
+        "en": {
+            "coverage": "Full Bible (OT + NT)",
+            "text_version": "King James Version (KJV)",
+            "audio_version": "English Standard Version (ESV) — audio.esv.org",
+            "text_audio_match": False,
+            "versification": "standard",
+            "versification_note": (
+                "Verse numbers match between KJV and ESV, but wording differs. "
+                "No free per-chapter KJV audio exists. Show a disclaimer to users."
+            ),
+        },
     }
 
+    meta = LANG_META.get(lang, {})
     return {
         "available": True,
         "language": lang,
@@ -186,7 +229,7 @@ async def audio_info(lang: str, book: str, chapter: int):
         "chapter": chapter,
         "audio_url": url,
         "source": source,
-        "coverage": coverage.get(lang, ""),
+        **meta,
     }
 
 
