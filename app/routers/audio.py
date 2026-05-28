@@ -150,21 +150,27 @@ def _build_audio_url(lang: str, abbr: str, chapter: int) -> tuple[str | None, st
 
 @router.get("/{lang}/audio/{book}/{chapter}/info")
 async def audio_info(lang: str, book: str, chapter: int):
-    """Return audio URL info as JSON without redirecting."""
+    """Return audio URL info as JSON without redirecting.
+    Returns 404 (not 200) when audio is unavailable so clients
+    can rely on HTTP status alone without parsing the JSON body.
+    """
     lang = lang.lower()
     abbr = book.upper()
 
     url, source = _build_audio_url(lang, abbr, chapter)
     if not url:
-        return {
-            "available": False,
-            "language": lang,
-            "book": abbr,
-            "chapter": chapter,
-            "audio_url": None,
-            "source": None,
-            "note": "Audio not available for this language/book combination.",
-        }
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "available": False,
+                "language": lang,
+                "book": abbr,
+                "chapter": chapter,
+                "audio_url": None,
+                "source": None,
+                "note": "Audio not available for this language/book combination.",
+            },
+        )
 
     coverage = {
         "am": "Full Bible (OT + NT) — missing Malachi (OT) and Luke (NT)",
