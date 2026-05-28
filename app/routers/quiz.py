@@ -120,10 +120,12 @@ async def _resolve_lang(lang: str, db: AsyncSession) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Gemini AI — question generation
+# Mistral AI — question generation (primary provider)
+# Free tier: 1 B tokens/month | Model: mistral-small-latest (Small 3.1)
+# OpenAI-compatible chat completions API with JSON-object response mode.
 # ---------------------------------------------------------------------------
 
-_GEMINI_SYSTEM = """\
+_SYSTEM_PROMPT = """\
 You are a Bible quiz question writer. Given Bible verse text you will generate
 multiple-choice trivia questions suitable for a Bible study app.
 
@@ -134,129 +136,115 @@ RULES:
 - Do NOT include the answer letter in the question text
 - Include a brief explanation (1-2 sentences) of why the answer is correct
 - Vary difficulty if asked for mixed
-- Return ONLY valid JSON — no markdown fences, no commentary
 - difficulty values: "beginner", "intermediate", "advanced"
+- Return ONLY valid JSON matching the OUTPUT FORMAT below — no extra text
 
-OUTPUT FORMAT (JSON array):
-[
-  {
-    "question": "...",
-    "option_a": "...",
-    "option_b": "...",
-    "option_c": "...",
-    "option_d": "...",
-    "correct_answer": "A",
-    "explanation": "...",
-    "difficulty": "beginner",
-    "verse_start": 1,
-    "verse_end": 1
-  }
-]
+OUTPUT FORMAT (JSON object with a "questions" array):
+{
+  "questions": [
+    {
+      "question": "...",
+      "option_a": "...",
+      "option_b": "...",
+      "option_c": "...",
+      "option_d": "...",
+      "correct_answer": "A",
+      "explanation": "...",
+      "difficulty": "beginner",
+      "verse_start": 1,
+      "verse_end": 1
+    }
+  ]
+}
 """
 
-# Gemini API error code → client-friendly message
-_GEMINI_ERROR_MESSAGES = {
-    400: ("GEMINI_BAD_REQUEST",   "The AI request was malformed.", None),
-    401: ("GEMINI_UNAUTHORIZED",  "Gemini API key is invalid or missing.",
-          "Set a valid GEMINI_API_KEY in your environment variables."),
-    403: ("GEMINI_FORBIDDEN",     "Gemini API key does not have permission.",
-          "Check your API key permissions at https://aistudio.google.com/app/apikey"),
-    429: ("GEMINI_RATE_LIMITED",  "Gemini AI is temporarily rate-limited.",
-          "You have exceeded the free tier quota. Wait 60 seconds and retry, "
-          "or use stored questions via GET /api/v1/quiz/{lang}/books/{book}/{chapter}"),
-    500: ("GEMINI_SERVER_ERROR",  "Gemini AI returned an internal error.", "Try again in a moment."),
-    503: ("GEMINI_UNAVAILABLE",   "Gemini AI service is temporarily unavailable.", "Try again in a moment."),
+# Mistral HTTP status → structured error
+_MISTRAL_ERRORS = {
+    401: ("AI_UNAUTHORIZED",  "Mistral API key is invalid.",
+          "Set a valid MISTRAL_API_KEY in the Railway Variables dashboard."),
+    422: ("AI_BAD_REQUEST",   "Mistral rejected the request.", None),
+    429: ("AI_RATE_LIMITED",  "AI generation is temporarily rate-limited.",
+          "Mistral's free tier is very generous (1B tokens/month) — "
+          "this is a short burst limit. Wait a few seconds and retry."),
+    500: ("AI_SERVER_ERROR",  "Mistral returned an internal error.", "Try again in a moment."),
+    503: ("AI_UNAVAILABLE",   "Mistral service is temporarily unavailable.", "Try again in a moment."),
 }
 
 
-async def _call_gemini(prompt: str) -> list[dict]:
-    """Call Gemini API and return parsed list of question dicts."""
-    if not settings.gemini_api_key:
+async def _call_mistral(prompt: str) -> list[dict]:
+    """Call Mistral chat-completions API and return a list of raw question dicts."""
+    if not settings.mistral_api_key:
         raise _quiz_error(
-            503, "GEMINI_NOT_CONFIGURED",
+            503, "AI_NOT_CONFIGURED",
             "AI question generation is not configured on this server.",
-            "The server admin must set GEMINI_API_KEY in environment variables.",
+            "The server admin must set MISTRAL_API_KEY in the Railway Variables dashboard.",
         )
-
-    url = (
-        f"{settings.gemini_base_url}/{settings.gemini_model}"
-        f":generateContent?key={settings.gemini_api_key}"
-    )
-
-    payload = {
-        "system_instruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 4096,
-            "responseMimeType": "application/json",
-        },
-    }
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(
+                f"{settings.mistral_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.mistral_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.mistral_model,
+                    "messages": [
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user",   "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.7,
+                    "max_tokens": 4096,
+                },
+            )
     except httpx.TimeoutException:
         raise _quiz_error(
-            504, "GEMINI_TIMEOUT",
-            "Gemini AI did not respond in time (60 s).",
+            504, "AI_TIMEOUT",
+            "Mistral AI did not respond in time (60 s).",
             "Try with fewer questions (count=3) or a shorter verse range.",
         )
     except httpx.RequestError as exc:
         raise _quiz_error(
-            502, "GEMINI_NETWORK_ERROR",
-            f"Could not reach Gemini API: {exc}",
-            "Check your internet connection or try again later.",
+            502, "AI_NETWORK_ERROR",
+            f"Could not reach Mistral API: {exc}",
+            "Check server connectivity or try again later.",
         )
 
     if resp.status_code != 200:
-        code, message, hint = _GEMINI_ERROR_MESSAGES.get(
+        code, message, hint = _MISTRAL_ERRORS.get(
             resp.status_code,
-            ("GEMINI_ERROR", f"Gemini API returned HTTP {resp.status_code}.", None),
+            ("AI_ERROR", f"Mistral API returned HTTP {resp.status_code}.", None),
         )
-        # Try to extract Gemini's own error message for extra context
         try:
-            gemini_msg = resp.json().get("error", {}).get("message", "")
-            if gemini_msg:
-                message = f"{message} Gemini says: {gemini_msg[:200]}"
+            api_msg = resp.json().get("message", "")
+            if api_msg:
+                message = f"{message} ({api_msg[:200]})"
         except Exception:
             pass
-        raise _quiz_error(resp.status_code if resp.status_code in (400, 401, 403, 429) else 502,
-                          code, message, hint)
-
-    data = resp.json()
-
-    # Check for safety blocks or empty candidates
-    candidates = data.get("candidates", [])
-    if not candidates:
-        finish = data.get("promptFeedback", {}).get("blockReason", "unknown")
         raise _quiz_error(
-            422, "GEMINI_BLOCKED",
-            f"Gemini refused to generate questions (block reason: {finish}).",
-            "Try rephrasing the request or using a different passage.",
-        )
-
-    finish_reason = candidates[0].get("finishReason", "")
-    if finish_reason == "SAFETY":
-        raise _quiz_error(
-            422, "GEMINI_SAFETY_BLOCK",
-            "Gemini blocked the response due to safety filters.",
-            "Try a different Bible passage.",
+            resp.status_code if resp.status_code in (401, 422, 429) else 502,
+            code, message, hint,
         )
 
     try:
-        raw_text = candidates[0]["content"]["parts"][0]["text"]
-        # Strip markdown code fences Gemini sometimes wraps around JSON
-        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text.strip())
-        raw_text = re.sub(r"\s*```$", "", raw_text.strip())
-        questions = json.loads(raw_text)
-        if not isinstance(questions, list):
-            raise ValueError("Expected a JSON array")
+        content = resp.json()["choices"][0]["message"]["content"]
+        data = json.loads(content)
+        # Expect {"questions": [...]} — gracefully handle bare [...] too
+        if isinstance(data, dict):
+            questions = data.get("questions", [])
+        elif isinstance(data, list):
+            questions = data
+        else:
+            raise ValueError(f"Unexpected JSON shape: {type(data)}")
+        if not isinstance(questions, list) or len(questions) == 0:
+            raise ValueError("'questions' list is empty or missing")
         return questions
     except (KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
         raise _quiz_error(
-            502, "GEMINI_PARSE_ERROR",
-            f"Gemini returned a response that could not be parsed as quiz questions: {exc}",
+            502, "AI_PARSE_ERROR",
+            f"Mistral returned a response that could not be parsed as quiz questions: {exc}",
             "This is a transient AI error — try again.",
         )
 
@@ -384,29 +372,30 @@ async def get_random_questions(
 @router.post(
     "/generate",
     response_model=GenerateQuizResponse,
-    summary="AI-generate quiz questions via Gemini",
+    summary="AI-generate quiz questions via Mistral",
 )
 async def generate_questions(
     req: GenerateQuizRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Use Gemini AI to generate 1–10 quiz questions for any Bible verse or chapter.
+    Use Mistral AI (Small 3.1, free tier) to generate 1–10 quiz questions for any
+    Bible verse or chapter.
 
     - Fetches the verse text from the database for the given language
-    - Sends it to Gemini with a structured prompt
+    - Sends it to Mistral with a structured prompt requesting JSON output
     - Returns fully-formed quiz questions: options A–D, correct answer, explanation
     - Set `save: true` to persist them for future use (they get real DB IDs)
 
     **Errors are structured** with `error_code` for programmatic handling:
-    - `BOOK_NOT_FOUND` — invalid book abbreviation or number
+    - `BOOK_NOT_FOUND`       — invalid book abbreviation or number
     - `CHAPTER_OUT_OF_RANGE` — chapter exceeds book's chapter count
-    - `LANGUAGE_NOT_FOUND` — unsupported language code
-    - `NO_VERSE_TEXT` — verse text not seeded for this lang/book/chapter
-    - `GEMINI_NOT_CONFIGURED` — server missing API key
-    - `GEMINI_RATE_LIMITED` — free tier quota exceeded (retry after 60 s)
-    - `GEMINI_TIMEOUT` — AI took too long; try fewer questions
-    - `GEMINI_PARSE_ERROR` — transient AI response issue; retry
+    - `LANGUAGE_NOT_FOUND`   — unsupported language code
+    - `NO_VERSE_TEXT`        — verse text not seeded for this lang/book/chapter
+    - `AI_NOT_CONFIGURED`    — server missing MISTRAL_API_KEY
+    - `AI_RATE_LIMITED`      — burst limit hit; wait a few seconds and retry
+    - `AI_TIMEOUT`           — AI took too long; try fewer questions (count=3)
+    - `AI_PARSE_ERROR`       — transient AI response issue; retry
     """
     b = await _resolve_book(req.book, db)
     lang = await _resolve_lang(req.language, db)
@@ -457,7 +446,7 @@ async def generate_questions(
         language=lang,
     )
 
-    raw_questions = await _call_gemini(prompt)
+    raw_questions = await _call_mistral(prompt)
 
     # Build model objects
     new_questions: list[QuizQuestion] = []
@@ -480,7 +469,7 @@ async def generate_questions(
                 explanation=rq.get("explanation"),
                 difficulty=rq.get("difficulty", "beginner"),
                 source="ai_generated",
-                author="Gemini AI",
+                author="Mistral AI",
                 is_verified=False,
             )
         )
