@@ -12,15 +12,16 @@ app = FastAPI(
 ## Ethiopian Bible API
 
 A fast, unified REST API serving the Holy Bible in **Amharic** (አማርኛ),
-**Oromo** (Afaan Oromoo), **Tigrigna** (ትግርኛ), and **English** (KJV).
+**Oromo** (Afaan Oromoo), **Tigrigna** (ትግርኛ), **English KJV**, and **English NIV**.
 
 ### Language Codes
-| Code | Language | Native Name |
-|------|----------|-------------|
-| `am` | Amharic  | አማርኛ         |
-| `or` | Oromo    | Afaan Oromoo |
-| `ti` | Tigrigna | ትግርኛ         |
-| `en` | English  | English KJV  |
+| Code  | Language | Native Name   |
+|-------|----------|---------------|
+| `am`  | Amharic  | አማርኛ           |
+| `or`  | Oromo    | Afaan Oromoo  |
+| `ti`  | Tigrigna | ትግርኛ           |
+| `en`  | English  | English KJV   |
+| `niv` | English  | English NIV   |
 
 ### Book Identifiers
 Use a book **number** (1–66) or **abbreviation** (GEN, EXO, MAT…).
@@ -55,10 +56,11 @@ async def root():
         "name": "Ethiopian Bible API",
         "version": settings.api_version,
         "languages": {
-            "am": "Amharic (አማርኛ)",
-            "or": "Oromo (Afaan Oromoo)",
-            "ti": "Tigrigna (ትግርኛ)",
-            "en": "English (KJV)",
+            "am":  "Amharic (አማርኛ)",
+            "or":  "Oromo (Afaan Oromoo)",
+            "ti":  "Tigrigna (ትግርኛ)",
+            "en":  "English (KJV)",
+            "niv": "English (NIV)",
         },
         "docs": "/docs",
         "endpoints": {

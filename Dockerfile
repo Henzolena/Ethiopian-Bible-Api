@@ -10,7 +10,7 @@ COPY scripts/ scripts/
 COPY data/ data/
 
 # Seed the database at build time from bundled JSON files
-RUN python -m scripts.seed_database
+RUN python -m scripts.seed_database --languages am or ti en niv
 
 EXPOSE 8000
 

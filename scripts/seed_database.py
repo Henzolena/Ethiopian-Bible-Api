@@ -28,10 +28,11 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 DB_URL = f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
 
 LANGUAGE_META = {
-    "am": ("Amharic",  "አማርኛ",         "ltr", DATA_DIR / "amharic.json"),
-    "or": ("Oromo",    "Afaan Oromoo",  "ltr", DATA_DIR / "oromo.json"),
-    "ti": ("Tigrigna", "ትግርኛ",          "ltr", DATA_DIR / "tigrigna.json"),
-    "en": ("English",  "English (KJV)", "ltr", DATA_DIR / "english.json"),
+    "am":  ("Amharic",  "አማርኛ",         "ltr", DATA_DIR / "amharic.json"),
+    "or":  ("Oromo",    "Afaan Oromoo",  "ltr", DATA_DIR / "oromo.json"),
+    "ti":  ("Tigrigna", "ትግርኛ",          "ltr", DATA_DIR / "tigrigna.json"),
+    "en":  ("English",  "English (KJV)", "ltr", DATA_DIR / "english.json"),
+    "niv": ("English",  "English (NIV)", "ltr", DATA_DIR / "niv.json"),
 }
 
 # Index into BOOKS tuple for each language's localized name
@@ -39,10 +40,11 @@ LANG_NAME_IDX = {"am": 5, "or": 6, "ti": 7}
 
 
 SCRAPE_CMDS = {
-    "am": "python -m scripts.scrape_amharic",
-    "or": "python -m scripts.scrape_oromo   (takes ~20 min — Bible.com)",
-    "ti": "python -m scripts.scrape_tigrigna  (takes ~7 min — API calls)",
-    "en": "python -m scripts.scrape_english",
+    "am":  "python -m scripts.scrape_amharic",
+    "or":  "python -m scripts.scrape_oromo   (takes ~20 min — Bible.com)",
+    "ti":  "python -m scripts.scrape_tigrigna  (takes ~7 min — API calls)",
+    "en":  "python -m scripts.scrape_english",
+    "niv": "python -m scripts.scrape_niv     (takes ~5 min — bolls.life API)",
 }
 
 
@@ -51,10 +53,11 @@ async def seed(lang_codes: list[str], force_scrape: bool):
 
     # --- fetch data if needed ---
     FETCHERS = {
-        "am": ("amharic.json",  "scripts.scrape_amharic", "fetch_amharic"),
-        "or": ("oromo.json",    "scripts.scrape_oromo",   "fetch_oromo"),
-        "ti": ("tigrigna.json", "scripts.scrape_tigrigna","fetch_tigrigna"),
-        "en": ("english.json",  "scripts.scrape_english", "fetch_english"),
+        "am":  ("amharic.json",  "scripts.scrape_amharic",  "fetch_amharic"),
+        "or":  ("oromo.json",    "scripts.scrape_oromo",    "fetch_oromo"),
+        "ti":  ("tigrigna.json", "scripts.scrape_tigrigna", "fetch_tigrigna"),
+        "en":  ("english.json",  "scripts.scrape_english",  "fetch_english"),
+        "niv": ("niv.json",      "scripts.scrape_niv",      "fetch_niv"),
     }
 
     for code in lang_codes:
@@ -223,7 +226,7 @@ async def seed(lang_codes: list[str], force_scrape: bool):
 def main():
     parser = argparse.ArgumentParser(description="Seed Ethiopian Bible database")
     parser.add_argument(
-        "--languages", nargs="+", default=["am", "or", "ti", "en"],
+        "--languages", nargs="+", default=["am", "or", "ti", "en", "niv"],
         help="Language codes to seed (default: all)"
     )
     parser.add_argument(

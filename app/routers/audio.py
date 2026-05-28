@@ -8,6 +8,7 @@ Sources discovered:
   Oromo    → archive.org          (NT only, per chapter)
   Tigrigna → archive.org          (NT only, per chapter)
   English  → audiotreasure.com    (full OT + NT, per chapter, KJV — exact text match)
+  NIV      → archive.org          (full OT + NT, per chapter — exact NIV text match)
 
 GET /{lang}/audio/{book}/{chapter}
     → 307 redirect to audio file
@@ -77,6 +78,37 @@ ARCHIVE_NT = {
 ARCHIVE_IDS = {
     "or": "bible_Audio_Oromo",
     "ti": "bible_Audio_Amharictigrinya",
+}
+
+# ---------------------------------------------------------------------------
+# NIV audio — archive.org "englishNIVAudioBible" collection
+# Pattern: https://archive.org/download/englishNIVAudioBible/englishniv/{name}/{NNN}.mp3
+# Full 66 books OT + NT, per chapter — exact match with bolls.life NIV text
+# ---------------------------------------------------------------------------
+
+NIV_AUDIO_BOOKS = {
+    "GEN": "genesis",        "EXO": "exodus",          "LEV": "leviticus",
+    "NUM": "numbers",        "DEU": "deuteronomy",      "JOS": "joshua",
+    "JDG": "judges",         "RUT": "ruth",             "1SA": "1samuel",
+    "2SA": "2samuel",        "1KI": "1kings",            "2KI": "2kings",
+    "1CH": "1chronicles",    "2CH": "2chronicles",       "EZR": "ezra",
+    "NEH": "nehemiah",       "EST": "esther",            "JOB": "job",
+    "PSA": "psalms",         "PRO": "proverbs",          "ECC": "ecclesiastes",
+    "SNG": "songOfSolomon",  "ISA": "isaiah",            "JER": "jeremiah",
+    "LAM": "lamentations",   "EZK": "ezekiel",           "DAN": "daniel",
+    "HOS": "hosea",          "JOL": "joel",              "AMO": "amos",
+    "OBA": "obadiah",        "JON": "jonah",             "MIC": "micah",
+    "NAH": "nahum",          "HAB": "habakkuk",          "ZEP": "zephaniah",
+    "HAG": "haggai",         "ZEC": "zechariah",         "MAL": "malachi",
+    "MAT": "matthew",        "MRK": "mark",              "LUK": "luke",
+    "JHN": "john",           "ACT": "acts",              "ROM": "romans",
+    "1CO": "1corinthians",   "2CO": "2corinthians",      "GAL": "galatians",
+    "EPH": "ephesians",      "PHP": "philippians",       "COL": "colossians",
+    "1TH": "1thessalonians", "2TH": "2thessalonians",    "1TI": "1timothy",
+    "2TI": "2timothy",       "TIT": "titus",             "PHM": "philemon",
+    "HEB": "hebrews",        "JAS": "james",             "1PE": "1peter",
+    "2PE": "2peter",         "1JN": "1john",             "2JN": "2john",
+    "3JN": "3john",          "JUD": "jude",              "REV": "revelation",
 }
 
 # ---------------------------------------------------------------------------
@@ -158,6 +190,16 @@ def _build_audio_url(lang: str, abbr: str, chapter: int) -> tuple[str | None, st
             return url, "AudioTreasure KJV (audiotreasure.com) — exact KJV text match"
         return None, None
 
+    if lang == "niv":
+        if abbr in NIV_AUDIO_BOOKS:
+            book_name = NIV_AUDIO_BOOKS[abbr]
+            url = (
+                f"https://archive.org/download/englishNIVAudioBible"
+                f"/englishniv/{book_name}/{chapter:03d}.mp3"
+            )
+            return url, "Internet Archive — English NIV Audio Bible (exact NIV text match)"
+        return None, None
+
     return None, None
 
 
@@ -229,6 +271,14 @@ async def audio_info(lang: str, book: str, chapter: int):
             "text_audio_match": True,
             "versification": "standard",
             "versification_note": "Verse numbers and wording match exactly between text and audio.",
+        },
+        "niv": {
+            "coverage": "Full Bible (OT + NT) — all 66 books",
+            "text_version": "New International Version (NIV) — Biblica, 2011",
+            "audio_version": "NIV Audio Bible — Internet Archive (englishNIVAudioBible)",
+            "text_audio_match": True,
+            "versification": "standard",
+            "versification_note": "NIV verse numbers match standard versification. Text and audio are both NIV 2011 edition.",
         },
     }
 
