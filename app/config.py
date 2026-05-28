@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/bible.db"
     api_title: str = "Ethiopian Bible API"
-    api_version: str = "1.2.0"
+    api_version: str = "1.3.0"
     debug: bool = False
 
     # Gemini AI — for on-demand quiz question generation
