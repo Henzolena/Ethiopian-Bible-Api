@@ -4,10 +4,10 @@ Audio Bible router.
 Endpoints redirect (307) to free hosted audio sources — no audio stored locally.
 
 Sources discovered:
-  Amharic  → j-e-c.org         (full OT + NT, per chapter)
-  Oromo    → archive.org       (NT only, per chapter)
-  Tigrigna → archive.org       (NT only, per chapter)
-  English  → audio.esv.org     (full OT + NT, per chapter, ESV audio)
+  Amharic  → j-e-c.org            (full OT + NT, per chapter)
+  Oromo    → archive.org          (NT only, per chapter)
+  Tigrigna → archive.org          (NT only, per chapter)
+  English  → audiotreasure.com    (full OT + NT, per chapter, KJV — exact text match)
 
 GET /{lang}/audio/{book}/{chapter}
     → 307 redirect to audio file
@@ -80,19 +80,35 @@ ARCHIVE_IDS = {
 }
 
 # ---------------------------------------------------------------------------
-# ESV audio uses USFM abbreviations directly
-# Pattern: https://audio.esv.org/hw/mq/{ABBR}.{chapter}.mp3
-# All 66 books available
+# AudioTreasure KJV — exact match with our KJV text
+# Pattern: https://audiotreasure.com/content/KJV_AT/{NN}_{BookName}{chapter:03d}.mp3
+# All 66 books, full OT + NT, per chapter — King James Version (voice only)
+# Source: https://audiotreasure.com (free, non-commercial use)
 # ---------------------------------------------------------------------------
 
-ESV_BOOKS = {
-    "GEN","EXO","LEV","NUM","DEU","JOS","JDG","RUT","1SA","2SA",
-    "1KI","2KI","1CH","2CH","EZR","NEH","EST","JOB","PSA","PRO",
-    "ECC","SNG","ISA","JER","LAM","EZK","DAN","HOS","JOL","AMO",
-    "OBA","JON","MIC","NAH","HAB","ZEP","HAG","ZEC","MAL",
-    "MAT","MRK","LUK","JHN","ACT","ROM","1CO","2CO","GAL","EPH",
-    "PHP","COL","1TH","2TH","1TI","2TI","TIT","PHM","HEB","JAS",
-    "1PE","2PE","1JN","2JN","3JN","JUD","REV",
+AUDIOTREASURE_KJV = {
+    "GEN": "01_Genesis",     "EXO": "02_Exodus",        "LEV": "03_Leviticus",
+    "NUM": "04_Numbers",     "DEU": "05_Deuteronomy",   "JOS": "06_Joshua",
+    "JDG": "07_Judges",      "RUT": "08_Ruth",           "1SA": "09_1Samuel",
+    "2SA": "10_2Samuel",     "1KI": "11_1Kings",         "2KI": "12_2Kings",
+    "1CH": "13_1Chronicles", "2CH": "14_2Chronicles",    "EZR": "15_Ezra",
+    "NEH": "16_Nehemiah",    "EST": "17_Esther",         "JOB": "18Job",
+    "PSA": "19_Psalms",      "PRO": "20_Proverbs",       "ECC": "21_Ecclesiastes",
+    "SNG": "22_Song_of_Solomon", "ISA": "23_Isaiah",     "JER": "24_Jeremiah",
+    "LAM": "25_Lamentations","EZK": "26_Ezekiel",        "DAN": "27_Daniel",
+    "HOS": "28_Hosea",       "JOL": "29_Joel",           "AMO": "30_Amos",
+    "OBA": "31_Obadiah",     "JON": "32_Jonah",          "MIC": "33_Micah",
+    "NAH": "34_Nahum",       "HAB": "35_Habakkuk",       "ZEP": "36_Zephaniah",
+    "HAG": "37_Haggai",      "ZEC": "38_Zechariah",      "MAL": "39_Malachi",
+    "MAT": "40_Matthew",     "MRK": "41_Mark",           "LUK": "42_Luke",
+    "JHN": "43_John",        "ACT": "44_Acts",           "ROM": "45_Romans",
+    "1CO": "46_1Corinthians","2CO": "47_2Corinthians",   "GAL": "48_Galatians",
+    "EPH": "49_Ephesians",   "PHP": "50_Philippians",    "COL": "51_Colossians",
+    "1TH": "52_1Thessalonians","2TH":"53_2Thessalonians","1TI": "54_1Timothy",
+    "2TI": "55_2Timothy",    "TIT": "56_Titus",          "PHM": "57_Philemon",
+    "HEB": "58_Hebrews",     "JAS": "59_James",          "1PE": "60_1Peter",
+    "2PE": "61_2Peter",      "1JN": "62_1John",          "2JN": "63_2John",
+    "3JN": "64_3John",       "JUD": "65_Jude",           "REV": "66_Revelation",
 }
 
 
@@ -136,12 +152,10 @@ def _build_audio_url(lang: str, abbr: str, chapter: int) -> tuple[str | None, st
         return None, None  # OT not available for or/ti
 
     if lang == "en":
-        if abbr in ESV_BOOKS:
-            url = f"https://audio.esv.org/hw/mq/{abbr}.{chapter}.mp3"
-            # NOTE: text is KJV but no free per-chapter KJV audio exists.
-            # ESV follows identical chapter/verse structure to KJV but uses
-            # modern wording — suitable for listening but not word-sync.
-            return url, "ESV Audio Bible (audio.esv.org) — audio is ESV, text is KJV"
+        if abbr in AUDIOTREASURE_KJV:
+            book_name = AUDIOTREASURE_KJV[abbr]
+            url = f"https://audiotreasure.com/content/KJV_AT/{book_name}{chapter:03d}.mp3"
+            return url, "AudioTreasure KJV (audiotreasure.com) — exact KJV text match"
         return None, None
 
     return None, None
@@ -209,15 +223,12 @@ async def audio_info(lang: str, book: str, chapter: int):
             ),
         },
         "en": {
-            "coverage": "Full Bible (OT + NT)",
+            "coverage": "Full Bible (OT + NT) — all 66 books",
             "text_version": "King James Version (KJV)",
-            "audio_version": "English Standard Version (ESV) — audio.esv.org",
-            "text_audio_match": False,
+            "audio_version": "King James Version (KJV) — AudioTreasure.com, voice only",
+            "text_audio_match": True,
             "versification": "standard",
-            "versification_note": (
-                "Verse numbers match between KJV and ESV, but wording differs. "
-                "No free per-chapter KJV audio exists. Show a disclaimer to users."
-            ),
+            "versification_note": "Verse numbers and wording match exactly between text and audio.",
         },
     }
 
