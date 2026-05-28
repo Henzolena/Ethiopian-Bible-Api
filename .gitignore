@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/bible.db
+data/*.json
+!data/.gitkeep
+.DS_Store
+.claude/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
