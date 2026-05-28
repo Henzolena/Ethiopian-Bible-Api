@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
-from app.routers import languages, books, verses, search, audio
+from app.routers import languages, books, verses, search, audio, coverage
 
 app = FastAPI(
     title=settings.api_title,
@@ -76,6 +76,8 @@ async def root():
             "compare": "/api/v1/compare/{book}/{chapter}/{verse}",
             "audio": "/api/v1/{lang}/audio/{book}/{chapter}",
             "audio_info": "/api/v1/{lang}/audio/{book}/{chapter}/info",
+            "coverage": "/api/v1/coverage",
+            "coverage_lang": "/api/v1/coverage/{lang}",
         },
     })
 
@@ -91,3 +93,4 @@ app.include_router(books.router, prefix=PREFIX)
 app.include_router(verses.router, prefix=PREFIX)
 app.include_router(search.router, prefix=PREFIX)
 app.include_router(audio.router, prefix=PREFIX)
+app.include_router(coverage.router, prefix=PREFIX)
