@@ -16,7 +16,14 @@ def _get_connect_args(url: str) -> dict:
 
 _connect_args = _get_connect_args(_db_url)
 
-engine = create_async_engine(_db_url, echo=False, connect_args=_connect_args)
+engine = create_async_engine(
+    _db_url,
+    echo=False,
+    connect_args=_connect_args,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
