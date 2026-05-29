@@ -4,13 +4,17 @@ from app.config import settings
 
 _db_url = settings.get_database_url()
 
-# Supabase (PostgreSQL) requires SSL + prepared_statement_cache_size=0 for
-# PgBouncer Transaction Mode (port 6543). SQLite needs no extra args.
-_connect_args = (
-    {"ssl": "require", "prepared_statement_cache_size": 0}
-    if _db_url.startswith("postgresql")
-    else {}
-)
+# Railway internal PostgreSQL (.railway.internal) — no SSL needed
+# Supabase / external PostgreSQL — SSL required
+# SQLite — no extra args
+def _get_connect_args(url: str) -> dict:
+    if not url.startswith("postgresql"):
+        return {}
+    if ".railway.internal" in url:
+        return {}   # internal Railway network, no SSL
+    return {"ssl": "require", "prepared_statement_cache_size": 0}
+
+_connect_args = _get_connect_args(_db_url)
 
 engine = create_async_engine(_db_url, echo=False, connect_args=_connect_args)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)

@@ -35,7 +35,12 @@ class Settings(BaseSettings):
         """
         Return a SQLAlchemy-safe async database URL.
         Priority: DB_HOST params > DATABASE_URL > local SQLite fallback.
-        Using separate params avoids special-character encoding issues in passwords.
+
+        Handles:
+        - DB_HOST/USER/PASSWORD params (Supabase, avoids $ encoding issues)
+        - DATABASE_URL with postgresql:// scheme (Railway PostgreSQL plugin)
+          → auto-converted to postgresql+asyncpg:// for SQLAlchemy
+        - Fallback to local SQLite for development
         """
         if self.db_host:
             user = quote_plus(self.db_user)
@@ -45,7 +50,12 @@ class Settings(BaseSettings):
                 f"@{self.db_host}:{self.db_port}/{self.db_name}"
             )
         if self.database_url:
-            return self.database_url
+            url = self.database_url
+            # Railway PostgreSQL plugin provides postgresql:// — convert for asyncpg
+            if url.startswith("postgresql://") or url.startswith("postgres://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+                url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+            return url
         return "sqlite+aiosqlite:///./data/bible.db"
 
     class Config:
