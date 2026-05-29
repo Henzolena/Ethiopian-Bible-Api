@@ -25,7 +25,11 @@ from scripts.bible_books import BOOKS
 
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-DB_URL = f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
+
+# Use DATABASE_URL env var if set (Supabase/PostgreSQL), else fall back to local SQLite
+import os
+_env_url = os.getenv("DATABASE_URL", "")
+DB_URL = _env_url if _env_url else f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
 
 LANGUAGE_META = {
     "am":  ("Amharic",  "አማርኛ",         "ltr", DATA_DIR / "amharic.json"),
@@ -87,16 +91,19 @@ async def seed(lang_codes: list[str], force_scrape: bool):
         fn(**kwargs)
 
     # --- database ---
-    engine = create_async_engine(DB_URL, echo=False)
+    is_postgres = DB_URL.startswith("postgresql")
+    connect_args = {"ssl": "require"} if is_postgres else {}
+    engine = create_async_engine(DB_URL, echo=False, connect_args=connect_args)
     Session = async_sessionmaker(engine, expire_on_commit=False)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     async with Session() as db:
-        # Enable WAL mode for better write performance
-        await db.execute(text("PRAGMA journal_mode=WAL"))
-        await db.execute(text("PRAGMA synchronous=NORMAL"))
+        # SQLite-only performance pragmas
+        if not is_postgres:
+            await db.execute(text("PRAGMA journal_mode=WAL"))
+            await db.execute(text("PRAGMA synchronous=NORMAL"))
 
         # --- seed books (once) ---
         existing = (await db.execute(text("SELECT COUNT(*) FROM books"))).scalar()

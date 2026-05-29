@@ -2,7 +2,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite+aiosqlite:///./data/bible.db"
+    # Supabase PostgreSQL — set DATABASE_URL in Railway Variables:
+    # postgresql+asyncpg://postgres.[ref]:[password]@aws-0-us-west-2.pooler.supabase.com:6543/postgres
+    database_url: str = "sqlite+aiosqlite:///./data/bible.db"  # local fallback only
     api_title: str = "Ethiopian Bible API"
     api_version: str = "1.4.0"
     debug: bool = False
