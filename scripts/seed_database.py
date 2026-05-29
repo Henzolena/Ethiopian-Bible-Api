@@ -26,22 +26,11 @@ from scripts.bible_books import BOOKS
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 
-# Use DATABASE_URL env var if set (Supabase/PostgreSQL), else fall back to local SQLite
-import os
-from urllib.parse import quote_plus
+# Use app.config to build the DB URL — handles scheme conversion, SSL, and
+# special characters in passwords consistently across app and scripts.
+from app.config import settings
 
-def _build_db_url() -> str:
-    db_host = os.getenv("DB_HOST", "")
-    if db_host:
-        user     = quote_plus(os.getenv("DB_USER", ""))
-        password = quote_plus(os.getenv("DB_PASSWORD", ""))
-        port     = os.getenv("DB_PORT", "5432")
-        name     = os.getenv("DB_NAME", "postgres")
-        return f"postgresql+asyncpg://{user}:{password}@{db_host}:{port}/{name}"
-    env_url = os.getenv("DATABASE_URL", "")
-    return env_url if env_url else f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
-
-DB_URL = _build_db_url()
+DB_URL = settings.get_database_url()
 
 LANGUAGE_META = {
     "am":  ("Amharic",  "አማርኛ",         "ltr", DATA_DIR / "amharic.json"),
@@ -103,8 +92,8 @@ async def seed(lang_codes: list[str], force_scrape: bool):
         fn(**kwargs)
 
     # --- database ---
-    is_postgres = DB_URL.startswith("postgresql")
-    connect_args = {"ssl": "require"} if is_postgres else {}
+    from app.database import _get_connect_args
+    connect_args = _get_connect_args(DB_URL)
     engine = create_async_engine(DB_URL, echo=False, connect_args=connect_args)
     Session = async_sessionmaker(engine, expire_on_commit=False)
 
