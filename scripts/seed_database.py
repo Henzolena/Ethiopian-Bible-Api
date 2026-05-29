@@ -102,7 +102,7 @@ async def seed(lang_codes: list[str], force_scrape: bool):
 
     async with Session() as db:
         # SQLite-only performance pragmas
-        if not is_postgres:
+        if not DB_URL.startswith("postgresql"):
             await db.execute(text("PRAGMA journal_mode=WAL"))
             await db.execute(text("PRAGMA synchronous=NORMAL"))
 
