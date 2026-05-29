@@ -29,7 +29,12 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from app.models import Base, Book, QuizQuestion
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-DB_URL = f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
+
+import os
+_env_url = os.getenv("DATABASE_URL", "")
+DB_URL = _env_url if _env_url else f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
+_IS_POSTGRES = DB_URL.startswith("postgresql")
+_CONNECT_ARGS = {"ssl": "require"} if _IS_POSTGRES else {}
 
 AUTHOR = "Ted Hildebrandt (biblicalelearning.org)"
 LANGUAGE = "niv"
@@ -179,7 +184,7 @@ async def seed(pdf_path: Path):
     parsed = _parse_questions(lines)
     print(f"[quiz] Parsed {len(parsed)} questions from PDF")
 
-    engine = create_async_engine(DB_URL, echo=False)
+    engine = create_async_engine(DB_URL, echo=False, connect_args=_CONNECT_ARGS)
     Session = async_sessionmaker(engine, expire_on_commit=False)
 
     async with engine.begin() as conn:
@@ -262,7 +267,7 @@ def main():
 
 
 async def _drop_and_seed(pdf_path: Path):
-    engine = create_async_engine(DB_URL, echo=False)
+    engine = create_async_engine(DB_URL, echo=False, connect_args=_CONNECT_ARGS)
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM quiz_questions WHERE language_code = 'niv' AND book_id IN (SELECT id FROM books WHERE abbreviation = 'GEN')"))
     await engine.dispose()
