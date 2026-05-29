@@ -47,7 +47,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup():
-    await init_db()
+    try:
+        await init_db()
+    except Exception:
+        # Multi-worker race: another worker already created the schema — safe to ignore
+        pass
 
 
 @app.get("/", tags=["Info"])
