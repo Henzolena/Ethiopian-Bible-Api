@@ -1,10 +1,20 @@
+from urllib.parse import quote_plus
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Supabase PostgreSQL — set DATABASE_URL in Railway Variables:
-    # postgresql+asyncpg://postgres.[ref]:[password]@aws-0-us-west-2.pooler.supabase.com:6543/postgres
-    database_url: str = "sqlite+aiosqlite:///./data/bible.db"  # local fallback only
+    # Option 1 — full URL (must URL-encode special chars in password, e.g. $ → %24)
+    # Leave blank and use DB_* vars below to avoid encoding issues.
+    database_url: str = ""
+
+    # Option 2 — individual Supabase connection params (preferred: no encoding needed)
+    # Set these in Railway Variables instead of DATABASE_URL when password has special chars.
+    db_host: str = ""
+    db_user: str = ""
+    db_password: str = ""
+    db_name: str = "postgres"
+    db_port: int = 5432
+
     api_title: str = "Ethiopian Bible API"
     api_version: str = "1.4.0"
     debug: bool = False
@@ -20,6 +30,23 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    def get_database_url(self) -> str:
+        """
+        Return a SQLAlchemy-safe async database URL.
+        Priority: DB_HOST params > DATABASE_URL > local SQLite fallback.
+        Using separate params avoids special-character encoding issues in passwords.
+        """
+        if self.db_host:
+            user = quote_plus(self.db_user)
+            password = quote_plus(self.db_password)
+            return (
+                f"postgresql+asyncpg://{user}:{password}"
+                f"@{self.db_host}:{self.db_port}/{self.db_name}"
+            )
+        if self.database_url:
+            return self.database_url
+        return "sqlite+aiosqlite:///./data/bible.db"
 
     class Config:
         env_file = ".env"

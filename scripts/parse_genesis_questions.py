@@ -31,8 +31,20 @@ from app.models import Base, Book, QuizQuestion
 DATA_DIR = Path(__file__).parent.parent / "data"
 
 import os
-_env_url = os.getenv("DATABASE_URL", "")
-DB_URL = _env_url if _env_url else f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
+from urllib.parse import quote_plus
+
+def _build_db_url() -> str:
+    db_host = os.getenv("DB_HOST", "")
+    if db_host:
+        user     = quote_plus(os.getenv("DB_USER", ""))
+        password = quote_plus(os.getenv("DB_PASSWORD", ""))
+        port     = os.getenv("DB_PORT", "5432")
+        name     = os.getenv("DB_NAME", "postgres")
+        return f"postgresql+asyncpg://{user}:{password}@{db_host}:{port}/{name}"
+    env_url = os.getenv("DATABASE_URL", "")
+    return env_url if env_url else f"sqlite+aiosqlite:///{DATA_DIR / 'bible.db'}"
+
+DB_URL = _build_db_url()
 _IS_POSTGRES = DB_URL.startswith("postgresql")
 _CONNECT_ARGS = {"ssl": "require"} if _IS_POSTGRES else {}
 
