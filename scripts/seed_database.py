@@ -155,7 +155,7 @@ async def seed(lang_codes: list[str], force_scrape: bool):
 
             print(f"[seed] Language: {lang_name} ({code}), id={lang.id}")
 
-            # Seed localized book names
+            # Seed localized book names (upsert — always apply latest name from bible_books.py)
             for row in BOOKS:
                 num, *rest = row
                 if code in LANG_NAME_IDX:
@@ -170,7 +170,9 @@ async def seed(lang_codes: list[str], force_scrape: bool):
                     )
                 )).scalar_one_or_none()
 
-                if not existing_name:
+                if existing_name:
+                    existing_name.name = local_name   # update in case it changed
+                else:
                     db.add(BookName(
                         book_id=book_map[num],
                         language_id=lang.id,
