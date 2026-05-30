@@ -179,7 +179,9 @@ async def seed(lang_codes: list[str], force_scrape: bool):
                         name=local_name,
                     ))
 
-            await db.flush()
+            # Always commit book name changes before potentially skipping verse insert
+            await db.commit()
+            print(f"[seed] {code}: book names committed")
 
             # Seed verses
             print(f"[seed] Loading verses from {json_path}...")
