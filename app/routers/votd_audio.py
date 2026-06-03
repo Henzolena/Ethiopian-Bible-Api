@@ -34,7 +34,7 @@ import io
 from datetime import date
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
 from app.config import settings
 
@@ -140,6 +140,49 @@ async def get_today():
         "audio_status": row.get("audio_status") if row else "pending",
         "date":         today_str,
     }
+
+
+@router.post("/request-audio")
+async def request_votd_audio(background_tasks: BackgroundTasks):
+    """
+    Public endpoint — iOS calls this on first play tap when audio isn't ready.
+    Returns immediately with the current status.
+    If status is pending/failed, marks row as generating and kicks off the
+    full pipeline (Mistral + Gemini TTS + upload) as a background task.
+    iOS should poll GET /today every 5 seconds until audio_status == "ready".
+    """
+    if not settings.supabase_url or not settings.supabase_service_key:
+        return {"status": "unavailable"}
+
+    today_str = date.today().isoformat()
+
+    async with httpx.AsyncClient(timeout=10) as http:
+        row = await _get_supabase_row(http, today_str)
+
+        # Already done — return immediately
+        if row and row.get("audio_status") == "ready":
+            return {"status": "ready", "audio_url": row.get("audio_url")}
+
+        # Already in progress — don't spawn a second task
+        if row and row.get("audio_status") == "generating":
+            return {"status": "generating", "poll_interval_seconds": 5}
+
+        # Mark as generating NOW (before returning) so concurrent taps are no-ops
+        verse = await _fetch_votd(http)
+        if not verse:
+            return {"status": "unavailable"}
+
+        ref = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
+        try:
+            await _upsert_row(http, today_str, ref, verse["book"],
+                              verse["chapter"], verse["verse"],
+                              verse["text"], "KJV", "generating")
+        except HTTPException:
+            return {"status": "unavailable"}
+
+    # Kick off full generation pipeline after the response is sent
+    background_tasks.add_task(_run_generation_background, today_str)
+    return {"status": "generating", "poll_interval_seconds": 5}
 
 
 # ── AI generation (raw httpx — no SDKs) ──────────────────────────────────────
@@ -334,6 +377,35 @@ async def _upload_audio(http: httpx.AsyncClient, date_str: str, mp3_bytes: bytes
             detail=f"Supabase Storage upload failed {r.status_code}: {r.text[:300]}",
         )
     return f"{settings.supabase_url}/storage/v1/object/public/{AUDIO_BUCKET}/{path}"
+
+
+async def _run_generation_background(today_str: str) -> None:
+    """
+    Full audio generation pipeline run as a FastAPI BackgroundTask.
+    Called by request_votd_audio after returning the response to the client.
+    """
+    async with httpx.AsyncClient(timeout=120) as http:
+        try:
+            verse = await _fetch_votd(http)
+            if not verse:
+                await _update_row(http, today_str, None, "failed")
+                return
+
+            ref  = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
+            text = verse["text"]
+
+            script                   = await _generate_script(ref, text, http)
+            audio_bytes, mime_type   = await _generate_audio(script, http)
+            mp3_bytes                = _to_mp3(audio_bytes, mime_type)
+            audio_url                = await _upload_audio(http, today_str, mp3_bytes)
+            await _update_row(http, today_str, audio_url, "ready")
+        except Exception as exc:
+            print(f"[VOTD background] generation failed: {exc}")
+            try:
+                async with httpx.AsyncClient(timeout=10) as h:
+                    await _update_row(h, today_str, None, "failed")
+            except Exception:
+                pass
 
 
 async def _update_row(
