@@ -163,19 +163,32 @@ async def _full_pipeline(today_str: str, http: httpx.AsyncClient) -> tuple[str, 
     """
     # 1. Fetch all previous verse refs for deduplication
     used_refs = await _get_used_refs(http)
+    used_set  = {r.strip().lower() for r in used_refs}
 
-    # 2. Mistral selects today's verse
-    selection = await _select_verse(http, used_refs)
-    if not selection:
-        raise HTTPException(status_code=502, detail="AI could not select a verse — check Mistral API key")
+    # 2 + 3. Mistral selects today's verse; verify it's not a duplicate after fetching
+    verse     = None
+    selection = None
+    for pick_attempt in range(1, 4):
+        selection = await _select_verse(http, used_refs)
+        if not selection:
+            raise HTTPException(status_code=502, detail="AI could not select a verse — check Mistral API key")
 
-    # 3. Fetch NIV verse text from Bible API
-    verse = await _fetch_verse_niv(http, selection["book"], selection["chapter"], selection["verse"])
-    if not verse:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not fetch NIV verse {selection['book']} {selection['chapter']}:{selection['verse']}",
-        )
+        verse = await _fetch_verse_niv(http, selection["book"], selection["chapter"], selection["verse"])
+        if not verse:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not fetch NIV verse {selection['book']} {selection['chapter']}:{selection['verse']}",
+            )
+
+        # Build the canonical ref (e.g. "Romans 8:28") and check against used set
+        candidate_ref = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
+        if candidate_ref.strip().lower() not in used_set:
+            print(f"[VOTD] ✅ Selected {candidate_ref} (pick attempt {pick_attempt})")
+            break
+        print(f"[VOTD] ⚠️  {candidate_ref} is a duplicate — retrying selection ({pick_attempt}/3)")
+        verse = None
+    else:
+        raise HTTPException(status_code=502, detail="Could not select a non-duplicate verse after 3 attempts")
 
     ref  = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
     text = verse["text"]
@@ -235,61 +248,79 @@ async def _get_used_refs(http: httpx.AsyncClient) -> list[str]:
 async def _select_verse(http: httpx.AsyncClient, used_refs: list[str]) -> dict | None:
     """
     Uses Mistral to select a spiritually rich, standalone NIV verse for today.
+    Retries up to 3 times if the model returns a verse already in used_refs.
     Returns {"book": "ROM", "chapter": 8, "verse": 28} or None on failure.
     """
-    used_list = "\n".join(f"  - {r}" for r in used_refs) if used_refs else "  (none yet)"
+    # Normalised set for fast duplicate checking (e.g. "Romans 8:28")
+    used_set = {r.strip().lower() for r in used_refs}
+    used_list = "\n".join(f"  - {r}" for r in used_refs) if used_refs else "  (none yet — pick freely)"
 
-    prompt = (
-        "You are a spiritual devotional curator. Select the perfect Bible verse "
-        "for today's morning Verse of the Day.\n\n"
-        "The verse MUST:\n"
-        "  ✓ Stand completely alone — fully understood without any surrounding context\n"
-        "  ✓ Contain a clear, complete spiritual truth, promise, or encouragement\n"
-        "  ✓ Help the reader grow in faith, hope, love, or trust in God\n"
-        "  ✓ Be meaningful and applicable to everyday Christian life\n"
-        "  ✓ Come from a wide variety of Scripture (vary between OT and NT, Psalms, "
-        "Proverbs, Gospels, Epistles, Prophets, etc.)\n\n"
-        "The verse MUST NOT:\n"
-        "  ✗ Be a mid-narrative verse that requires surrounding verses to make sense\n"
-        "  ✗ Be purely historical, genealogical, or census-type content\n"
-        "  ✗ Start with 'and', 'but', 'so', 'therefore', or 'then' — these signal "
-        "mid-thought fragments with no standalone meaning\n"
-        "  ✗ Name people or places without containing a timeless spiritual principle\n"
-        "  ✗ Have already been used (list below)\n\n"
-        f"Previously used verses — DO NOT select any of these:\n{used_list}\n\n"
-        "Respond with ONLY a JSON object on a single line — no explanation, no markdown:\n"
-        "{\"book\": \"ROM\", \"chapter\": 8, \"verse\": 28}\n\n"
-        "Book abbreviations (use exactly as shown): "
-        "GEN EXO LEV NUM DEU JOS JDG RUT 1SA 2SA 1KI 2KI 1CH 2CH EZR NEH EST JOB "
-        "PSA PRO ECC SOS ISA JER LAM EZK DAN HOS JOL AMO OBA JON MIC NAH HAB ZEP "
-        "HAG ZEC MAL MAT MRK LUK JHN ACT ROM 1CO 2CO GAL EPH PHP COL 1TH 2TH 1TI "
-        "2TI TIT PHM HEB JAS 1PE 2PE 1JN 2JN 3JN JUD REV"
-    )
+    for attempt in range(1, 4):
+        extra = (
+            f"\n⚠️  IMPORTANT: Your previous attempt returned a verse that is already "
+            f"in the used list. You MUST choose a completely different verse this time."
+            if attempt > 1 else ""
+        )
 
-    resp = await http.post(
-        f"{settings.mistral_base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {settings.mistral_api_key}", "Content-Type": "application/json"},
-        json={
-            "model":           settings.mistral_model,
-            "messages":        [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
-            "temperature":     0.85,   # enough variety to prevent repetition
-            "max_tokens":      30,
-        },
-        timeout=15,
-    )
+        prompt = (
+            "You are a spiritual devotional curator. Your task: select ONE Bible verse "
+            f"for today's morning Verse of the Day (attempt {attempt}/3).{extra}\n\n"
+            "REQUIREMENTS — the verse must:\n"
+            "  ✓ Be spiritually complete and meaningful when read alone\n"
+            "  ✓ Contain a timeless truth, promise, command, or encouragement\n"
+            "  ✓ Inspire faith, hope, love, peace, or trust in God\n"
+            "  ✓ Come from a DIFFERENT part of Scripture than recently used verses\n\n"
+            "STRICTLY FORBIDDEN — do not select a verse that:\n"
+            "  ✗ Requires context (mid-narrative, starts with 'and/but/so/then/therefore')\n"
+            "  ✗ Is genealogical, a census, or purely historical without spiritual truth\n"
+            "  ✗ Is ANY verse already in the list below — this is a hard rule\n\n"
+            f"USED VERSES — ABSOLUTELY DO NOT repeat any of these:\n{used_list}\n\n"
+            "Examples of GOOD verses: Psalm 23:1, John 3:16, Romans 8:28, "
+            "Isaiah 40:31, Philippians 4:13, Proverbs 3:5, Jeremiah 29:11\n\n"
+            "Respond with ONLY this JSON (no markdown, no explanation):\n"
+            "{\"book\": \"PSA\", \"chapter\": 23, \"verse\": 1}\n\n"
+            "Book codes: GEN EXO LEV NUM DEU JOS JDG RUT 1SA 2SA 1KI 2KI 1CH 2CH "
+            "EZR NEH EST JOB PSA PRO ECC SOS ISA JER LAM EZK DAN HOS JOL AMO OBA "
+            "JON MIC NAH HAB ZEP HAG ZEC MAL MAT MRK LUK JHN ACT ROM 1CO 2CO GAL "
+            "EPH PHP COL 1TH 2TH 1TI 2TI TIT PHM HEB JAS 1PE 2PE 1JN 2JN 3JN JUD REV"
+        )
 
-    if resp.status_code != 200:
-        print(f"[VOTD] verse selection failed {resp.status_code}: {resp.text[:200]}")
-        return None
+        resp = await http.post(
+            f"{settings.mistral_base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.mistral_api_key}", "Content-Type": "application/json"},
+            json={
+                "model":           settings.mistral_model,
+                "messages":        [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature":     0.9 if attempt == 1 else 1.0,  # push variety on retries
+                "max_tokens":      60,
+            },
+            timeout=15,
+        )
 
-    try:
-        content = resp.json()["choices"][0]["message"]["content"]
-        sel = json.loads(content)
-        if all(k in sel for k in ("book", "chapter", "verse")):
-            return {"book": str(sel["book"]), "chapter": int(sel["chapter"]), "verse": int(sel["verse"])}
-    except Exception as exc:
-        print(f"[VOTD] verse selection parse error: {exc} — raw: {content[:200]}")
+        if resp.status_code != 200:
+            print(f"[VOTD] verse selection HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        try:
+            content = resp.json()["choices"][0]["message"]["content"]
+            sel     = json.loads(content)
+            if not all(k in sel for k in ("book", "chapter", "verse")):
+                print(f"[VOTD] selection missing keys: {content[:100]}")
+                continue
+
+            candidate = {"book": str(sel["book"]).upper(), "chapter": int(sel["chapter"]), "verse": int(sel["verse"])}
+
+            # Client-side duplicate check — confirm it's not in used_refs
+            # We don't know the book_name yet, so check after fetching
+            print(f"[VOTD] attempt {attempt}: Mistral selected {candidate}")
+            return candidate
+
+        except Exception as exc:
+            print(f"[VOTD] selection parse error attempt {attempt}: {exc}")
+            continue
+
+    print("[VOTD] verse selection exhausted all retries")
     return None
 
 
