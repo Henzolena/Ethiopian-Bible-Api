@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
-from app.routers import languages, books, verses, search, audio, coverage, quiz
+from app.routers import languages, books, verses, search, audio, coverage, quiz, votd_audio
 
 app = FastAPI(
     title=settings.api_title,
@@ -101,10 +101,11 @@ PREFIX = "/api/v1"
 # IMPORTANT: quiz and coverage must be registered BEFORE the generic /{lang}/...
 # routers (verses, books, search, audio).  FastAPI uses first-match routing, so
 # specific prefixes (/quiz/*, /coverage/*) must win over wildcard /{lang}/*.
-app.include_router(languages.router, prefix=PREFIX)
-app.include_router(coverage.router, prefix=PREFIX)
-app.include_router(quiz.router,      prefix=PREFIX)
-app.include_router(books.router,     prefix=PREFIX)
-app.include_router(verses.router,    prefix=PREFIX)
-app.include_router(search.router,    prefix=PREFIX)
-app.include_router(audio.router,     prefix=PREFIX)
+app.include_router(languages.router,   prefix=PREFIX)
+app.include_router(coverage.router,   prefix=PREFIX)
+app.include_router(quiz.router,       prefix=PREFIX)
+app.include_router(votd_audio.router, prefix=PREFIX)   # must be before /{lang}/... routers
+app.include_router(books.router,      prefix=PREFIX)
+app.include_router(verses.router,     prefix=PREFIX)
+app.include_router(search.router,     prefix=PREFIX)
+app.include_router(audio.router,      prefix=PREFIX)
