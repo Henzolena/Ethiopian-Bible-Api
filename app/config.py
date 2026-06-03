@@ -26,10 +26,13 @@ class Settings(BaseSettings):
     mistral_model: str = "mistral-small-latest"   # Small 3.1 — best quality on free tier
     mistral_base_url: str = "https://api.mistral.ai/v1"
 
-    # Gemini AI — kept as optional fallback (legacy) + used for VOTD TTS
+    # Gemini AI — optional fallback (legacy)
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    # OpenAI — used for VOTD TTS (tts-1-hd, onyx voice)
+    openai_api_key: str = ""
 
     # Verse of the Day audio generation
     supabase_url: str = ""          # https://bpqauxqpibaosnbvhito.supabase.co

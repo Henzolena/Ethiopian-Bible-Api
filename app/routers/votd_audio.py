@@ -31,8 +31,6 @@ Required Railway env vars
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import io
 import json
 from datetime import date
@@ -361,33 +359,36 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
 # ── AI: Gemini TTS ────────────────────────────────────────────────────────────
 
 async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, str]:
-    """Calls Gemini TTS. Retries up to 3× on 429."""
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_TTS_MODEL}:generateContent?key={settings.gemini_api_key}"
-    )
-    payload = {
-        "contents": [{"parts": [{"text": script}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
+    """
+    Calls OpenAI TTS-1-HD (onyx voice) and returns (mp3_bytes, "audio/mpeg").
+    Response is MP3 directly — no base64 decoding or ffmpeg conversion needed.
+    Cost: ~$0.030 per 1K characters (~$1.08/month for 30 daily clips).
+    """
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured in Railway Variables")
+
+    resp = await http.post(
+        "https://api.openai.com/v1/audio/speech",
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type":  "application/json",
         },
-    }
+        json={
+            "model":           "tts-1-hd",
+            "input":           script,
+            "voice":           "onyx",        # deep, warm, authoritative — ideal for devotionals
+            "response_format": "mp3",
+            "speed":           0.92,          # slightly slower pace suits devotional listening
+        },
+        timeout=60,
+    )
 
-    for attempt in range(1, 4):
-        resp = await http.post(url, json=payload, timeout=90)
-        if resp.status_code == 200:
-            part      = resp.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
-            mime_type = part.get("mimeType", "audio/wav")
-            return base64.b64decode(part["data"]), mime_type
-        if resp.status_code == 429 and attempt < 3:
-            wait = 15 * attempt
-            print(f"[VOTD] Gemini TTS 429 — waiting {wait}s (attempt {attempt+1}/3)")
-            await asyncio.sleep(wait)
-            continue
-        raise HTTPException(status_code=502, detail=f"Gemini TTS error {resp.status_code}: {resp.text[:300]}")
+    if resp.status_code == 429:
+        raise HTTPException(status_code=429, detail="OpenAI TTS rate limited — retry in a moment")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"OpenAI TTS error {resp.status_code}: {resp.text[:300]}")
 
-    raise HTTPException(status_code=502, detail="Gemini TTS rate-limited after 3 attempts")
+    return resp.content, "audio/mpeg"  # already MP3 — _to_mp3 passes it straight through
 
 
 def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
