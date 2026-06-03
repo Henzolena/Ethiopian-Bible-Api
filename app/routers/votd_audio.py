@@ -191,10 +191,21 @@ def _wav_to_mp3(wav_bytes: bytes) -> bytes:
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
-def _sb_headers() -> dict:
+def _sb_read_headers() -> dict:
+    """Anon key — sufficient for public SELECT (verse_of_the_day has public RLS)."""
+    key = settings.supabase_anon_key
     return {
-        "apikey":        settings.supabase_service_key,
-        "Authorization": f"Bearer {settings.supabase_service_key}",
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+    }
+
+def _sb_write_headers() -> dict:
+    """Service-role key — required for INSERT/UPDATE and Storage uploads."""
+    key = settings.supabase_service_key
+    return {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
         "Content-Type":  "application/json",
     }
 
@@ -209,10 +220,13 @@ async def _fetch_votd(http: httpx.AsyncClient) -> dict | None:
 
 
 async def _get_supabase_row(http: httpx.AsyncClient, date_str: str) -> dict | None:
+    """Public read — uses anon key (table has public SELECT policy)."""
+    if not settings.supabase_url or not settings.supabase_anon_key:
+        return None
     r = await http.get(
         f"{settings.supabase_url}/rest/v1/verse_of_the_day",
         params={"date": f"eq.{date_str}", "select": "audio_url,audio_status"},
-        headers=_sb_headers(),
+        headers=_sb_read_headers(),
     )
     rows = r.json() if r.status_code == 200 else []
     return rows[0] if rows else None
@@ -232,7 +246,7 @@ async def _upsert_row(
             "verse_text": text, "translation": translation,
             "audio_status": status,
         },
-        headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates"},
+        headers={**_sb_write_headers(), "Prefer": "resolution=merge-duplicates"},
     )
 
 
@@ -263,5 +277,5 @@ async def _update_row(
         f"{settings.supabase_url}/rest/v1/verse_of_the_day",
         json=payload,
         params={"date": f"eq.{date_str}"},
-        headers=_sb_headers(),
+        headers=_sb_write_headers(),
     )

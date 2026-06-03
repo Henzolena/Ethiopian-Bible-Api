@@ -33,7 +33,8 @@ class Settings(BaseSettings):
 
     # Verse of the Day audio generation
     supabase_url: str = ""          # https://bpqauxqpibaosnbvhito.supabase.co
-    supabase_service_key: str = ""  # service_role key (write access to DB + Storage)
+    supabase_anon_key: str = ""     # anon/publishable key  — used for public reads
+    supabase_service_key: str = ""  # service_role key      — used for writes + storage
     votd_admin_key: str = ""        # protects POST /api/v1/votd/generate-audio
 
     def get_database_url(self) -> str:
