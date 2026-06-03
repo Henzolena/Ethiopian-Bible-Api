@@ -94,7 +94,7 @@ async def generate_votd_audio(x_admin_key: str | None = Header(None, alias="X-Ad
 
         # 3. Mark row as "generating" so concurrent calls bail early.
         await _upsert_row(http, today_str, ref, verse["book"],
-                          verse["chapter"], verse["verse"], text, "KJV", "generating")
+                          verse["chapter"], verse["verse"], text, "NIV", "generating")
 
         try:
             # 4. Mistral writes the devotional script (plain text, no JSON).
@@ -176,7 +176,7 @@ async def request_votd_audio(background_tasks: BackgroundTasks):
         try:
             await _upsert_row(http, today_str, ref, verse["book"],
                               verse["chapter"], verse["verse"],
-                              verse["text"], "KJV", "generating")
+                              verse["text"], "NIV", "generating")
         except HTTPException:
             return {"status": "unavailable"}
 
@@ -188,16 +188,26 @@ async def request_votd_audio(background_tasks: BackgroundTasks):
 # ── AI generation (raw httpx — no SDKs) ──────────────────────────────────────
 
 async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
-    """Calls Mistral chat-completions to write a ~200-word spoken devotional."""
+    """Calls Mistral chat-completions to write a ~200-word spoken NIV devotional."""
     prompt = (
-        f"Write a 180-to-200-word spoken biblical devotional about this verse:\n\n"
-        f"{ref}: \"{text}\"\n\n"
-        "Structure (spoken delivery — no headers, no markdown, no stage directions):\n"
-        "1. Read the verse naturally.\n"
-        "2. Explain its historical or biblical context (2-3 sentences).\n"
-        "3. Share a practical, encouraging application for today (3-4 sentences).\n"
-        "4. Close with a short prayer or blessing (1-2 sentences).\n\n"
-        "Write ONLY the spoken text."
+        "You are a warm, Spirit-filled biblical devotional speaker — like a trusted pastor "
+        "sitting across the table from someone beginning their morning.\n\n"
+        f"Today's verse (NIV) is {ref}:\n\"{text}\"\n\n"
+        "Write a 180-200 word spoken devotional. Follow this exact structure:\n\n"
+        "1. READ — speak the verse once, naturally and clearly, as you would say it aloud.\n"
+        "2. ILLUMINATE (2-3 sentences) — unpack the heart of this verse simply: "
+        "what God is communicating, who it was written to, and the spiritual truth at its core. "
+        "No academic language — speak to the heart, not the head.\n"
+        "3. APPLY (3-4 sentences) — bring this verse into today. "
+        "What does God want this person to feel, believe, or do because of this truth? "
+        "Be personal, warm, and specific to THIS verse — avoid generic phrases.\n"
+        "4. BLESS (1-2 sentences) — close with a sincere, simple prayer or blessing "
+        "the listener can carry into their day.\n\n"
+        "Rules:\n"
+        "- Use modern NIV-level English — clear, warm, never archaic\n"
+        "- Speak to ONE person, not a crowd\n"
+        "- Every sentence must earn its place — no filler, no clichés\n"
+        "- Write ONLY the spoken text. No headers, no bullet points, no stage directions."
     )
 
     resp = await http.post(
@@ -318,7 +328,7 @@ def _sb_write_headers() -> dict:
 
 async def _fetch_votd(http: httpx.AsyncClient) -> dict | None:
     try:
-        r = await http.get("http://localhost:8000/api/v1/en/votd", timeout=10)
+        r = await http.get("http://localhost:8000/api/v1/niv/votd", timeout=10)
         return r.json() if r.status_code == 200 else None
     except Exception:
         return None
