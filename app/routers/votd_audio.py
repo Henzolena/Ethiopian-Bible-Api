@@ -395,8 +395,8 @@ def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
     """Converts audio bytes → MP3 via ffmpeg (Python 3.13-safe, no pydub)."""
     import os, subprocess, tempfile
 
-    if "mp3" in mime_type.lower():
-        return audio_bytes
+    if "mp3" in mime_type.lower() or "mpeg" in mime_type.lower():
+        return audio_bytes  # OpenAI returns audio/mpeg — already MP3, pass straight through
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".input") as f:
         f.write(audio_bytes)
