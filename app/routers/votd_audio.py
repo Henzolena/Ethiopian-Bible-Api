@@ -237,40 +237,48 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
 async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, str]:
     """
     Calls Gemini 2.5 Flash Preview TTS via REST and returns (audio_bytes, mime_type).
-    The audio is typically PCM/WAV — pydub converts it to MP3 downstream.
+    Retries up to 3 times with backoff on 429 rate-limit responses.
     """
+    import asyncio
+
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_TTS_MODEL}:generateContent?key={settings.gemini_api_key}"
     )
-
-    resp = await http.post(
-        url,
-        json={
-            "contents": [{"parts": [{"text": script}]}],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": "Kore"}
-                    }
-                },
+    payload = {
+        "contents": [{"parts": [{"text": script}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": "Kore"}
+                }
             },
         },
-        timeout=90,
-    )
+    }
 
-    if resp.status_code != 200:
+    for attempt in range(1, 4):
+        resp = await http.post(url, json=payload, timeout=90)
+
+        if resp.status_code == 200:
+            data      = resp.json()
+            part      = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+            mime_type = part.get("mimeType", "audio/wav")
+            raw_bytes = base64.b64decode(part["data"])
+            return raw_bytes, mime_type
+
+        if resp.status_code == 429 and attempt < 3:
+            wait = 15 * attempt   # 15s, 30s
+            print(f"[VOTD] Gemini TTS 429 — waiting {wait}s before retry {attempt+1}/3")
+            await asyncio.sleep(wait)
+            continue
+
         raise HTTPException(
             status_code=502,
             detail=f"Gemini TTS error {resp.status_code}: {resp.text[:300]}",
         )
 
-    data      = resp.json()
-    part      = data["candidates"][0]["content"]["parts"][0]["inlineData"]
-    mime_type = part.get("mimeType", "audio/wav")
-    raw_bytes = base64.b64decode(part["data"])
-    return raw_bytes, mime_type
+    raise HTTPException(status_code=502, detail="Gemini TTS rate-limited after 3 attempts")
 
 
 def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
