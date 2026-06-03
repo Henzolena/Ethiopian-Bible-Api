@@ -53,8 +53,17 @@ async def generate_votd_audio(x_admin_key: str | None = Header(None, alias="X-Ad
     Generates and stores devotional audio for today's verse.
     Idempotent — returns early if audio is already ready.
     Trigger once per day (Railway cron or manual curl).
+    Requires SUPABASE_SERVICE_KEY env var (service_role key from Supabase → Settings → API).
     """
     _check_admin(x_admin_key)
+
+    if not settings.supabase_url or not settings.supabase_service_key:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in Railway Variables. "
+                   "Get the service_role key from Supabase dashboard → Settings → API.",
+        )
+
     today_str = date.today().isoformat()
 
     async with httpx.AsyncClient(timeout=120) as http:
