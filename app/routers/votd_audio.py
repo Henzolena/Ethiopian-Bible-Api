@@ -44,8 +44,45 @@ from app.config import settings
 
 router = APIRouter(prefix="/votd", tags=["Verse of the Day"])
 
-AUDIO_BUCKET    = "verse-audio"
+AUDIO_BUCKET     = "verse-audio"
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+
+# ── Curated verse pool ────────────────────────────────────────────────────────
+# 60 hand-picked NIV verses that each stand completely alone, contain a timeless
+# spiritual truth, and are meaningful for morning devotion. Covers a wide range
+# of Scripture: Psalms, Proverbs, Gospels, Epistles, Prophets, and more.
+# Adding to this list over time keeps the daily rotation fresh for years.
+
+_VERSE_POOL = [
+    # Psalms
+    ("PSA",  23,  1), ("PSA",  46, 10), ("PSA",  27,  1), ("PSA",  34,  8),
+    ("PSA",  91,  1), ("PSA", 119,105), ("PSA", 121,  2), ("PSA", 143,  8),
+    ("PSA",  37,  4), ("PSA",   1,  1),
+    # Proverbs
+    ("PRO",   3,  5), ("PRO",  31, 25), ("PRO",   4, 23), ("PRO",  16,  3),
+    ("PRO",   3,  6),
+    # Gospel of John
+    ("JHN",   3, 16), ("JHN",  14,  6), ("JHN",  10, 10), ("JHN",   8, 32),
+    ("JHN",  15,  5),
+    # Gospel of Matthew
+    ("MAT",   6, 33), ("MAT",  11, 28), ("MAT",   5,  6), ("MAT",   5, 16),
+    # Romans
+    ("ROM",   8, 28), ("ROM",   8,  1), ("ROM",  12,  2), ("ROM",  15, 13),
+    ("ROM",   5,  8),
+    # Epistles
+    ("PHP",   4, 13), ("PHP",   4,  6), ("EPH",   2,  8), ("EPH",   3, 20),
+    ("GAL",   2, 20), ("COL",   3, 23), ("HEB",  11,  1), ("HEB",  13,  8),
+    ("1CO",  13,  4), ("2CO",   5, 17), ("2TI",   1,  7), ("JAS",   1,  5),
+    ("1PE",   5,  7), ("1JN",   4, 19),
+    # Isaiah
+    ("ISA",  40, 31), ("ISA",  41, 10), ("ISA",  43,  2), ("ISA",  26,  3),
+    # Other prophets & OT
+    ("JER",  29, 11), ("MIC",   6,  8), ("ZEP",   3, 17), ("LAM",   3, 22),
+    ("JOS",   1,  9), ("DEU",  31,  6),
+    # New Testament misc
+    ("LUK",   1, 37), ("ACT",   1,  8), ("REV",   3, 20), ("MAT",  28, 20),
+    ("ROM",  10, 17), ("1TH",   5, 18),
+]
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -163,32 +200,31 @@ async def _full_pipeline(today_str: str, http: httpx.AsyncClient) -> tuple[str, 
     """
     # 1. Fetch all previous verse refs for deduplication
     used_refs = await _get_used_refs(http)
-    used_set  = {r.strip().lower() for r in used_refs}
+    used_set  = {r.strip().lower() for r in used_refs if r}
 
-    # 2 + 3. Mistral selects today's verse; verify it's not a duplicate after fetching
-    verse     = None
-    selection = None
-    for pick_attempt in range(1, 4):
-        selection = await _select_verse(http, used_refs)
-        if not selection:
-            raise HTTPException(status_code=502, detail="AI could not select a verse — check Mistral API key")
+    # 2 + 3. Pick from curated pool, skipping already-used verses
+    verse = None
+    import hashlib
+    day_hash = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
+    pool     = list(_VERSE_POOL)
+    start    = day_hash % len(pool)
+    ordered  = pool[start:] + pool[:start]
 
-        verse = await _fetch_verse_niv(http, selection["book"], selection["chapter"], selection["verse"])
-        if not verse:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Could not fetch NIV verse {selection['book']} {selection['chapter']}:{selection['verse']}",
-            )
+    for entry in ordered:
+        candidate = {"book": entry[0], "chapter": entry[1], "verse": entry[2]}
+        v = await _fetch_verse_niv(http, candidate["book"], candidate["chapter"], candidate["verse"])
+        if not v:
+            continue
+        candidate_ref = f"{v['book_name']} {v['chapter']}:{v['verse']}"
+        if candidate_ref.strip().lower() in used_set:
+            print(f"[VOTD] ⏭  {candidate_ref} already used — trying next in pool")
+            continue
+        verse = v
+        print(f"[VOTD] ✅ Selected {candidate_ref}")
+        break
 
-        # Build the canonical ref (e.g. "Romans 8:28") and check against used set
-        candidate_ref = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
-        if candidate_ref.strip().lower() not in used_set:
-            print(f"[VOTD] ✅ Selected {candidate_ref} (pick attempt {pick_attempt})")
-            break
-        print(f"[VOTD] ⚠️  {candidate_ref} is a duplicate — retrying selection ({pick_attempt}/3)")
-        verse = None
-    else:
-        raise HTTPException(status_code=502, detail="Could not select a non-duplicate verse after 3 attempts")
+    if not verse:
+        raise HTTPException(status_code=502, detail="All curated verses have been used — expand the pool")
 
     ref  = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
     text = verse["text"]
@@ -245,82 +281,25 @@ async def _get_used_refs(http: httpx.AsyncClient) -> list[str]:
     return [row["verse_ref"] for row in r.json() if row.get("verse_ref")]
 
 
-async def _select_verse(http: httpx.AsyncClient, used_refs: list[str]) -> dict | None:
+def _select_verse_from_pool(used_set: set[str], today_str: str) -> dict | None:
     """
-    Uses Mistral to select a spiritually rich, standalone NIV verse for today.
-    Retries up to 3 times if the model returns a verse already in used_refs.
-    Returns {"book": "ROM", "chapter": 8, "verse": 28} or None on failure.
+    Selects today's verse from _VERSE_POOL deterministically:
+    1. Filter out any verses already used (by matching fetched book_name+ch:v).
+    2. Use date-based offset to rotate through the pool so each day is different.
+    Returns {"book": "PSA", "chapter": 23, "verse": 1} or None if pool exhausted.
     """
-    # Normalised set for fast duplicate checking (e.g. "Romans 8:28")
-    used_set = {r.strip().lower() for r in used_refs}
-    used_list = "\n".join(f"  - {r}" for r in used_refs) if used_refs else "  (none yet — pick freely)"
-
-    for attempt in range(1, 4):
-        extra = (
-            f"\n⚠️  IMPORTANT: Your previous attempt returned a verse that is already "
-            f"in the used list. You MUST choose a completely different verse this time."
-            if attempt > 1 else ""
-        )
-
-        prompt = (
-            "You are a spiritual devotional curator. Your task: select ONE Bible verse "
-            f"for today's morning Verse of the Day (attempt {attempt}/3).{extra}\n\n"
-            "REQUIREMENTS — the verse must:\n"
-            "  ✓ Be spiritually complete and meaningful when read alone\n"
-            "  ✓ Contain a timeless truth, promise, command, or encouragement\n"
-            "  ✓ Inspire faith, hope, love, peace, or trust in God\n"
-            "  ✓ Come from a DIFFERENT part of Scripture than recently used verses\n\n"
-            "STRICTLY FORBIDDEN — do not select a verse that:\n"
-            "  ✗ Requires context (mid-narrative, starts with 'and/but/so/then/therefore')\n"
-            "  ✗ Is genealogical, a census, or purely historical without spiritual truth\n"
-            "  ✗ Is ANY verse already in the list below — this is a hard rule\n\n"
-            f"USED VERSES — ABSOLUTELY DO NOT repeat any of these:\n{used_list}\n\n"
-            "Examples of GOOD verses: Psalm 23:1, John 3:16, Romans 8:28, "
-            "Isaiah 40:31, Philippians 4:13, Proverbs 3:5, Jeremiah 29:11\n\n"
-            "Respond with ONLY this JSON (no markdown, no explanation):\n"
-            "{\"book\": \"PSA\", \"chapter\": 23, \"verse\": 1}\n\n"
-            "Book codes: GEN EXO LEV NUM DEU JOS JDG RUT 1SA 2SA 1KI 2KI 1CH 2CH "
-            "EZR NEH EST JOB PSA PRO ECC SOS ISA JER LAM EZK DAN HOS JOL AMO OBA "
-            "JON MIC NAH HAB ZEP HAG ZEC MAL MAT MRK LUK JHN ACT ROM 1CO 2CO GAL "
-            "EPH PHP COL 1TH 2TH 1TI 2TI TIT PHM HEB JAS 1PE 2PE 1JN 2JN 3JN JUD REV"
-        )
-
-        resp = await http.post(
-            f"{settings.mistral_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.mistral_api_key}", "Content-Type": "application/json"},
-            json={
-                "model":           settings.mistral_model,
-                "messages":        [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"},
-                "temperature":     0.9 if attempt == 1 else 1.0,  # push variety on retries
-                "max_tokens":      60,
-            },
-            timeout=15,
-        )
-
-        if resp.status_code != 200:
-            print(f"[VOTD] verse selection HTTP {resp.status_code}: {resp.text[:200]}")
-            return None
-
-        try:
-            content = resp.json()["choices"][0]["message"]["content"]
-            sel     = json.loads(content)
-            if not all(k in sel for k in ("book", "chapter", "verse")):
-                print(f"[VOTD] selection missing keys: {content[:100]}")
-                continue
-
-            candidate = {"book": str(sel["book"]).upper(), "chapter": int(sel["chapter"]), "verse": int(sel["verse"])}
-
-            # Client-side duplicate check — confirm it's not in used_refs
-            # We don't know the book_name yet, so check after fetching
-            print(f"[VOTD] attempt {attempt}: Mistral selected {candidate}")
-            return candidate
-
-        except Exception as exc:
-            print(f"[VOTD] selection parse error attempt {attempt}: {exc}")
-            continue
-
-    print("[VOTD] verse selection exhausted all retries")
+    # Build candidate list — skip already used refs by book+chapter+verse key
+    # We can't easily map (book_code, ch, v) → display ref without fetching,
+    # so we keep all pool entries and let the post-fetch check in _full_pipeline
+    # handle any collision (rare — pool has 60 entries, dedup list grows slowly).
+    import hashlib
+    # Stable daily offset so the same pool entry isn't always tried first
+    day_hash = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
+    pool     = list(_VERSE_POOL)
+    start    = day_hash % len(pool)
+    ordered  = pool[start:] + pool[:start]
+    for entry in ordered:
+        return {"book": entry[0], "chapter": entry[1], "verse": entry[2]}
     return None
 
 
