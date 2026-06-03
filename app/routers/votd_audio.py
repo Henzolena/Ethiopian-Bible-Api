@@ -7,18 +7,22 @@ GET  /api/v1/votd/today            (public)
 
 Flow
 ----
-  1. Fetch today's verse from this service's own GET /api/v1/en/votd endpoint.
-  2. Mistral small writes a 180-200 word spoken devotional script.
-  3. Gemini 2.5 Flash TTS converts the script to WAV audio.
-  4. pydub converts WAV → MP3 @ 128 kbps (requires ffmpeg in the container).
+  1. Fetch today's verse from this service's own GET /api/v1/en/votd.
+  2. Mistral chat-completions (OpenAI-compatible API via httpx) writes
+     a 180-200 word spoken devotional script.
+  3. Gemini 2.5 Flash Preview TTS REST API converts the script to audio.
+  4. pydub converts WAV/PCM → MP3 @ 128 kbps (ffmpeg in container).
   5. MP3 uploaded to Supabase Storage bucket "verse-audio" as {date}.mp3.
-  6. Supabase verse_of_the_day row updated: audio_url + audio_status = "ready".
+  6. Supabase verse_of_the_day row updated: audio_url + status = "ready".
+
+Uses only httpx for all external API calls — no Python AI SDKs required.
 
 Required Railway environment variables
 ---------------------------------------
   SUPABASE_URL          https://bpqauxqpibaosnbvhito.supabase.co
-  SUPABASE_SERVICE_KEY  <service_role key from Supabase dashboard → Settings → API>
-  VOTD_ADMIN_KEY        <any secret string you choose>
+  SUPABASE_ANON_KEY     anon/publishable key  (public reads)
+  SUPABASE_SERVICE_KEY  service_role key      (DB writes + Storage uploads)
+  VOTD_ADMIN_KEY        any secret string you choose
   GEMINI_API_KEY        already set ✅
   MISTRAL_API_KEY       already set ✅
 """
@@ -37,6 +41,8 @@ from app.config import settings
 router = APIRouter(prefix="/votd", tags=["Verse of the Day"])
 
 AUDIO_BUCKET = "verse-audio"
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -52,16 +58,17 @@ async def generate_votd_audio(x_admin_key: str | None = Header(None, alias="X-Ad
     """
     Generates and stores devotional audio for today's verse.
     Idempotent — returns early if audio is already ready.
-    Trigger once per day (Railway cron or manual curl).
-    Requires SUPABASE_SERVICE_KEY env var (service_role key from Supabase → Settings → API).
+    Requires SUPABASE_SERVICE_KEY (service_role key from Supabase → Settings → API).
     """
     _check_admin(x_admin_key)
 
     if not settings.supabase_url or not settings.supabase_service_key:
         raise HTTPException(
             status_code=503,
-            detail="SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in Railway Variables. "
-                   "Get the service_role key from Supabase dashboard → Settings → API.",
+            detail=(
+                "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in Railway Variables. "
+                "Get the service_role key from Supabase dashboard → Settings → API."
+            ),
         )
 
     today_str = date.today().isoformat()
@@ -90,14 +97,14 @@ async def generate_votd_audio(x_admin_key: str | None = Header(None, alias="X-Ad
                           verse["chapter"], verse["verse"], text, "KJV", "generating")
 
         try:
-            # 4. Mistral writes the devotional script.
-            script = _generate_script(ref, text)
+            # 4. Mistral writes the devotional script (plain text, no JSON).
+            script = await _generate_script(ref, text, http)
 
-            # 5. Gemini TTS → WAV bytes.
-            wav_bytes = _generate_audio_bytes(script)
+            # 5. Gemini TTS → raw audio bytes + mime type.
+            audio_bytes, mime_type = await _generate_audio(script, http)
 
-            # 6. WAV → MP3.
-            mp3_bytes = _wav_to_mp3(wav_bytes)
+            # 6. Convert to MP3.
+            mp3_bytes = _to_mp3(audio_bytes, mime_type)
 
             # 7. Upload to Supabase Storage.
             audio_url = await _upload_audio(http, today_str, mp3_bytes)
@@ -112,6 +119,9 @@ async def generate_votd_audio(x_admin_key: str | None = Header(None, alias="X-Ad
                 "script_preview": script[:120] + "…",
             }
 
+        except HTTPException:
+            await _update_row(http, today_str, None, "failed")
+            raise
         except Exception as exc:
             await _update_row(http, today_str, None, "failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -132,95 +142,116 @@ async def get_today():
     }
 
 
-# ── Generation ────────────────────────────────────────────────────────────────
+# ── AI generation (raw httpx — no SDKs) ──────────────────────────────────────
 
-def _generate_script(ref: str, text: str) -> str:
-    """Uses Mistral to write a 180-200 word spoken devotional."""
-    from mistralai import Mistral  # type: ignore
-
-    client = Mistral(api_key=settings.mistral_api_key)
+async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
+    """Calls Mistral chat-completions to write a ~200-word spoken devotional."""
     prompt = (
-        "You are a warm, reverent biblical devotional speaker.\n"
-        f"Write a 180-to-200-word spoken devotional about this verse:\n\n"
+        f"Write a 180-to-200-word spoken biblical devotional about this verse:\n\n"
         f"{ref}: \"{text}\"\n\n"
-        "Structure (spoken delivery only — no headers, no markdown):\n"
+        "Structure (spoken delivery — no headers, no markdown, no stage directions):\n"
         "1. Read the verse naturally.\n"
-        "2. Briefly explain its historical or biblical context (2–3 sentences).\n"
-        "3. Share a practical, encouraging application for today (3–4 sentences).\n"
-        "4. Close with a short prayer or blessing (1–2 sentences).\n\n"
-        "Write ONLY the spoken text. No stage directions."
-    )
-    resp = client.chat.complete(
-        model=settings.mistral_model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=350,
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content.strip()
-
-
-def _generate_audio_bytes(script: str) -> bytes:
-    """Calls Gemini 2.5 Flash TTS and returns raw WAV bytes."""
-    import google.generativeai as genai  # type: ignore
-    from google.generativeai.types import (  # type: ignore
-        GenerateContentConfig,
-        PrebuiltVoiceConfig,
-        SpeechConfig,
-        VoiceConfig,
+        "2. Explain its historical or biblical context (2-3 sentences).\n"
+        "3. Share a practical, encouraging application for today (3-4 sentences).\n"
+        "4. Close with a short prayer or blessing (1-2 sentences).\n\n"
+        "Write ONLY the spoken text."
     )
 
-    client = genai.Client(api_key=settings.gemini_api_key)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-preview-tts",
-        contents=script,
-        config=GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=SpeechConfig(
-                voice_config=VoiceConfig(
-                    prebuilt_voice_config=PrebuiltVoiceConfig(
-                        voice_name="Kore"   # warm, clear, reverent
-                    )
-                )
-            ),
-        ),
+    resp = await http.post(
+        f"{settings.mistral_base_url}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {settings.mistral_api_key}",
+            "Content-Type":  "application/json",
+        },
+        json={
+            "model":       settings.mistral_model,
+            "messages":    [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens":  400,
+        },
+        timeout=30,
     )
-    b64 = response.candidates[0].content.parts[0].inline_data.data
-    return base64.b64decode(b64)
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Mistral API error {resp.status_code}: {resp.text[:200]}",
+        )
+
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-def _wav_to_mp3(wav_bytes: bytes) -> bytes:
-    """Converts WAV bytes → MP3 @ 128 kbps. Requires ffmpeg in the container."""
-    from pydub import AudioSegment  # type: ignore
+async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, str]:
+    """
+    Calls Gemini 2.5 Flash Preview TTS via REST and returns (audio_bytes, mime_type).
+    The audio is typically PCM/WAV — pydub converts it to MP3 downstream.
+    """
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_TTS_MODEL}:generateContent?key={settings.gemini_api_key}"
+    )
 
-    seg = AudioSegment.from_wav(io.BytesIO(wav_bytes))
-    buf = io.BytesIO()
-    seg.export(buf, format="mp3", bitrate="128k")
-    return buf.getvalue()
+    resp = await http.post(
+        url,
+        json={
+            "contents": [{"parts": [{"text": script}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": "Kore"}
+                    }
+                },
+            },
+        },
+        timeout=90,
+    )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini TTS error {resp.status_code}: {resp.text[:300]}",
+        )
+
+    data      = resp.json()
+    part      = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+    mime_type = part.get("mimeType", "audio/wav")
+    raw_bytes = base64.b64decode(part["data"])
+    return raw_bytes, mime_type
+
+
+def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
+    """Converts Gemini audio output (WAV or raw PCM) → MP3 @ 128 kbps via pydub."""
+    from pydub import AudioSegment  # requires ffmpeg in container
+
+    buf_in = io.BytesIO(audio_bytes)
+
+    if "wav" in mime_type.lower():
+        seg = AudioSegment.from_wav(buf_in)
+    elif "mp3" in mime_type.lower():
+        return audio_bytes   # already MP3 — pass through
+    else:
+        # Raw linear16 PCM at 24 kHz, mono (Gemini TTS default)
+        seg = AudioSegment.from_raw(buf_in, sample_width=2, frame_rate=24000, channels=1)
+
+    buf_out = io.BytesIO()
+    seg.export(buf_out, format="mp3", bitrate="128k")
+    return buf_out.getvalue()
 
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 
 def _sb_read_headers() -> dict:
-    """Anon key — sufficient for public SELECT (verse_of_the_day has public RLS)."""
     key = settings.supabase_anon_key
-    return {
-        "apikey":        key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type":  "application/json",
-    }
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
 
 def _sb_write_headers() -> dict:
-    """Service-role key — required for INSERT/UPDATE and Storage uploads."""
     key = settings.supabase_service_key
-    return {
-        "apikey":        key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type":  "application/json",
-    }
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
 async def _fetch_votd(http: httpx.AsyncClient) -> dict | None:
-    """Fetches today's English verse from this service's own /en/votd endpoint."""
     try:
         r = await http.get("http://localhost:8000/api/v1/en/votd", timeout=10)
         return r.json() if r.status_code == 200 else None
@@ -229,7 +260,6 @@ async def _fetch_votd(http: httpx.AsyncClient) -> dict | None:
 
 
 async def _get_supabase_row(http: httpx.AsyncClient, date_str: str) -> dict | None:
-    """Public read — uses anon key (table has public SELECT policy)."""
     if not settings.supabase_url or not settings.supabase_anon_key:
         return None
     r = await http.get(
