@@ -478,6 +478,7 @@ async def _upsert_verse(
 
 
 async def _upload_audio(http: httpx.AsyncClient, date_str: str, mp3_bytes: bytes) -> str:
+    import time
     path = f"{date_str}.mp3"
     r = await http.post(
         f"{settings.supabase_url}/storage/v1/object/{AUDIO_BUCKET}/{path}",
@@ -491,7 +492,9 @@ async def _upload_audio(http: httpx.AsyncClient, date_str: str, mp3_bytes: bytes
     )
     if r.status_code not in (200, 201):
         raise HTTPException(status_code=502, detail=f"Storage upload failed {r.status_code}: {r.text[:300]}")
-    return f"{settings.supabase_url}/storage/v1/object/public/{AUDIO_BUCKET}/{path}"
+    # Append a version timestamp so iOS/CDN cache is busted on every regeneration
+    v = int(time.time())
+    return f"{settings.supabase_url}/storage/v1/object/public/{AUDIO_BUCKET}/{path}?v={v}"
 
 
 async def _update_status(
