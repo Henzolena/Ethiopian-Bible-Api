@@ -221,22 +221,44 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, 
 
 
 def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
-    """Converts Gemini audio output (WAV or raw PCM) → MP3 @ 128 kbps via pydub."""
-    from pydub import AudioSegment  # requires ffmpeg in container
+    """
+    Converts Gemini audio output → MP3 @ 128 kbps using ffmpeg directly.
+    Avoids pydub (broken on Python 3.13 — pyaudioop removed from stdlib).
+    ffmpeg is installed in the container via Dockerfile.
+    """
+    import os
+    import subprocess
+    import tempfile
 
-    buf_in = io.BytesIO(audio_bytes)
+    if "mp3" in mime_type.lower():
+        return audio_bytes  # already MP3 — pass through
 
-    if "wav" in mime_type.lower():
-        seg = AudioSegment.from_wav(buf_in)
-    elif "mp3" in mime_type.lower():
-        return audio_bytes   # already MP3 — pass through
-    else:
-        # Raw linear16 PCM at 24 kHz, mono (Gemini TTS default)
-        seg = AudioSegment.from_raw(buf_in, sample_width=2, frame_rate=24000, channels=1)
+    # Write input to a temp file, let ffmpeg auto-detect format
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".input") as f:
+        f.write(audio_bytes)
+        in_path = f.name
 
-    buf_out = io.BytesIO()
-    seg.export(buf_out, format="mp3", bitrate="128k")
-    return buf_out.getvalue()
+    out_path = in_path + ".mp3"
+    try:
+        # For raw PCM (Gemini TTS default: linear16, 24 kHz, mono)
+        if "wav" in mime_type.lower():
+            cmd = ["ffmpeg", "-y", "-i", in_path, "-b:a", "128k", out_path]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "s16le", "-ar", "24000", "-ac", "1",
+                "-i", in_path,
+                "-b:a", "128k", out_path,
+            ]
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()[-300:]}")
+        with open(out_path, "rb") as fmp3:
+            return fmp3.read()
+    finally:
+        os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
 
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────

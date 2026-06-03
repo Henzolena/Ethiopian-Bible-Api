@@ -9,4 +9,3 @@ pydantic>=2.7.0
 pydantic-settings>=2.2.0
 python-dotenv>=1.0.0
 pdfplumber>=0.11.0
-pydub>=0.25.1
