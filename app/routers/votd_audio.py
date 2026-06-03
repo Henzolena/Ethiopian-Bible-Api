@@ -299,7 +299,7 @@ async def _upsert_row(
     chapter: int, verse: int, text: str,
     translation: str, status: str,
 ) -> None:
-    await http.post(
+    r = await http.post(
         f"{settings.supabase_url}/rest/v1/verse_of_the_day",
         json={
             "date": date_str, "verse_ref": ref, "book": book,
@@ -309,19 +309,30 @@ async def _upsert_row(
         },
         headers={**_sb_write_headers(), "Prefer": "resolution=merge-duplicates"},
     )
+    if r.status_code not in (200, 201, 204):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Supabase upsert failed {r.status_code}: {r.text[:300]}",
+        )
 
 
 async def _upload_audio(http: httpx.AsyncClient, date_str: str, mp3_bytes: bytes) -> str:
     path = f"{date_str}.mp3"
-    await http.post(
+    r = await http.post(
         f"{settings.supabase_url}/storage/v1/object/{AUDIO_BUCKET}/{path}",
         content=mp3_bytes,
         headers={
+            "apikey":        settings.supabase_service_key,
             "Authorization": f"Bearer {settings.supabase_service_key}",
             "Content-Type":  "audio/mpeg",
             "x-upsert":      "true",
         },
     )
+    if r.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Supabase Storage upload failed {r.status_code}: {r.text[:300]}",
+        )
     return f"{settings.supabase_url}/storage/v1/object/public/{AUDIO_BUCKET}/{path}"
 
 
@@ -334,9 +345,14 @@ async def _update_row(
     payload: dict = {"audio_status": status}
     if audio_url:
         payload["audio_url"] = audio_url
-    await http.patch(
+    r = await http.patch(
         f"{settings.supabase_url}/rest/v1/verse_of_the_day",
         json=payload,
         params={"date": f"eq.{date_str}"},
         headers=_sb_write_headers(),
     )
+    if r.status_code not in (200, 201, 204):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Supabase row update failed {r.status_code}: {r.text[:300]}",
+        )
