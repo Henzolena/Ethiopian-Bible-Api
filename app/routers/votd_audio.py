@@ -45,6 +45,10 @@ router = APIRouter(prefix="/votd", tags=["Verse of the Day"])
 AUDIO_BUCKET     = "verse-audio"
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 
+# Four voices rotated daily — warm/expressive variety for devotional content
+# Date-based selection: same day always gets same voice; changes each new day
+GEMINI_VOICES = ["Zephyr", "Aoede", "Fenrir", "Charon"]
+
 # ── Curated verse pool ────────────────────────────────────────────────────────
 # 60 hand-picked NIV verses that each stand completely alone, contain a timeless
 # spiritual truth, and are meaningful for morning devotion. Covers a wide range
@@ -388,6 +392,13 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> bytes:
     if not keys:
         raise HTTPException(status_code=503, detail="No GEMINI_API_KEY configured in Railway Variables")
 
+    # Pick today's voice deterministically from the 4-voice rotation
+    import hashlib
+    today_str_for_voice = date.today().isoformat()
+    day_index = int(hashlib.md5(today_str_for_voice.encode()).hexdigest(), 16) % len(GEMINI_VOICES)
+    voice     = GEMINI_VOICES[day_index]
+    print(f"[VOTD] Today's voice: {voice} (day {day_index+1} of {len(GEMINI_VOICES)}-voice rotation)")
+
     url_template = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         "gemini-2.5-flash-preview-tts:generateContent?key={key}"
@@ -396,7 +407,7 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> bytes:
         "contents": [{"parts": [{"text": script}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
         },
     }
 
