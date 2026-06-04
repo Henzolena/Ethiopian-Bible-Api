@@ -392,12 +392,12 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> bytes:
     if not keys:
         raise HTTPException(status_code=503, detail="No GEMINI_API_KEY configured in Railway Variables")
 
-    # Pick today's voice deterministically from the 4-voice rotation
-    import hashlib
-    today_str_for_voice = date.today().isoformat()
-    day_index = int(hashlib.md5(today_str_for_voice.encode()).hexdigest(), 16) % len(GEMINI_VOICES)
+    # Pick today's voice using day-of-year so each voice gets equal rotation
+    # e.g. day 1=Zephyr, day 2=Aoede, day 3=Fenrir, day 4=Charon, day 5=Zephyr…
+    today_obj = date.today()
+    day_index = (today_obj.timetuple().tm_yday - 1) % len(GEMINI_VOICES)
     voice     = GEMINI_VOICES[day_index]
-    print(f"[VOTD] Today's voice: {voice} (day {day_index+1} of {len(GEMINI_VOICES)}-voice rotation)")
+    print(f"[VOTD] Today's voice: {voice} (day-of-year {today_obj.timetuple().tm_yday}, slot {day_index+1}/{len(GEMINI_VOICES)})")
 
     url_template = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
