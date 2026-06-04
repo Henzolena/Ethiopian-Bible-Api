@@ -315,27 +315,39 @@ async def _fetch_verse_niv(http: httpx.AsyncClient, book: str, chapter: int, ver
 
 # ── AI: devotional script ─────────────────────────────────────────────────────
 
+def _strip_markdown(text: str) -> str:
+    """
+    Remove all markdown formatting from a script before TTS.
+    Mistral occasionally adds **bold**, *italic*, # headers, and bullet points
+    even when told not to — these get vocalised as noise by OpenAI TTS.
+    """
+    import re
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)   # **bold** / *italic*
+    text = re.sub(r'_{1,2}([^_]+)_{1,2}',   r'\1', text)   # __bold__ / _italic_
+    text = re.sub(r'^#{1,6}\s+',             '',   text, flags=re.MULTILINE)  # # headers
+    text = re.sub(r'^\s*[-*+]\s+',           '',   text, flags=re.MULTILINE)  # bullet points
+    text = re.sub(r'`[^`]+`',               r'',  text)    # `code`
+    text = re.sub(r'\n{3,}',               '\n\n', text)   # collapse excess blank lines
+    return text.strip()
+
+
 async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
-    """Calls Mistral to write a 180-200 word spoken NIV devotional."""
+    """Calls Mistral to write a 180-200 word spoken NIV devotional, then strips any markdown."""
     prompt = (
-        "You are a warm, Spirit-filled biblical devotional speaker — "
-        "like a trusted pastor speaking directly to someone beginning their morning.\n\n"
-        f"Today's Verse of the Day (NIV) — {ref}:\n\"{text}\"\n\n"
-        "Write a 180-200 word spoken devotional in exactly this structure:\n\n"
-        "1. READ — speak the verse once, naturally and clearly.\n"
-        "2. ILLUMINATE (2-3 sentences) — unpack what God is saying in this verse simply. "
-        "Who wrote it, to whom, and what is the core spiritual truth? "
-        "Speak to the heart, not the head — no academic language.\n"
-        "3. APPLY (3-4 sentences) — bring this verse into today. "
-        "What does God want this specific person to feel, believe, or do? "
-        "Be warm, personal, and specific to THIS verse — no generic filler.\n"
-        "4. BLESS (1-2 sentences) — close with a sincere prayer or blessing "
-        "the listener carries into their day.\n\n"
-        "Rules:\n"
-        "- Modern NIV-level English — clear, never archaic\n"
-        "- Speak to ONE person directly\n"
-        "- Every sentence must matter — no repetition, no clichés\n"
-        "- Write ONLY the spoken text. No headers, no bullet points."
+        "You are a warm, Spirit-filled pastor delivering a spoken morning devotional.\n"
+        "You are speaking directly into someone's ear — this text will be converted to AUDIO.\n\n"
+        f"Today's verse (NIV): {ref} — \"{text}\"\n\n"
+        "Deliver a 180-200 word spoken devotional in four flowing paragraphs:\n"
+        "Paragraph 1: Read the verse aloud naturally.\n"
+        "Paragraph 2: In 2-3 sentences explain what God is saying — simple, heartfelt, not academic.\n"
+        "Paragraph 3: In 3-4 sentences bring this truth into today — personal, warm, specific.\n"
+        "Paragraph 4: A sincere 1-2 sentence prayer or blessing to close.\n\n"
+        "CRITICAL — this is read by a TTS engine:\n"
+        "- Output ONLY plain spoken sentences. Zero exceptions.\n"
+        "- NO asterisks, NO pound signs, NO dashes used as bullets, NO bold, NO italic.\n"
+        "- NO section labels like 'READ:' or 'APPLY:' or 'BLESS:'.\n"
+        "- NO markdown of any kind. Plain text only.\n"
+        "- Separate paragraphs with a single blank line."
     )
 
     resp = await http.post(
@@ -353,7 +365,8 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Mistral script error {resp.status_code}: {resp.text[:200]}")
 
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    return _strip_markdown(raw)
 
 
 # ── AI: Gemini TTS ────────────────────────────────────────────────────────────
