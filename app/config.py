@@ -26,8 +26,11 @@ class Settings(BaseSettings):
     mistral_model: str = "mistral-small-latest"   # Small 3.1 — best quality on free tier
     mistral_base_url: str = "https://api.mistral.ai/v1"
 
-    # Gemini AI — optional fallback (legacy)
-    gemini_api_key: str = ""
+    # Gemini AI — primary TTS provider (free during preview, ~$0.25/mo after)
+    # Three accounts rotate on 429 so no single quota ever blocks daily generation
+    gemini_api_key_henokrobale:     str = ""   # primary
+    gemini_api_key_eeccaustinchurch: str = ""  # fallback 1
+    gemini_api_key_eeccaustinapp:   str = ""   # fallback 2
     gemini_model: str = "gemini-2.0-flash"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
 

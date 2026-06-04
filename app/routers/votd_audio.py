@@ -370,38 +370,89 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
 
 async def _generate_audio(script: str, http: httpx.AsyncClient) -> bytes:
     """
-    Calls OpenAI TTS-1-HD and returns raw MP3 bytes ready for upload.
-    No conversion, no ffmpeg — OpenAI returns a completed MP3 directly.
+    Calls Gemini 2.5 Flash TTS and returns raw WAV/PCM bytes → converted to MP3.
+    Rotates through up to 3 API keys on 429 so a single account's daily quota
+    never blocks generation.
 
-    Voice: nova — warm, natural, expressive. Most human-sounding OpenAI voice.
-    Cost: ~$0.030/1K chars ≈ $1.08/month for 30 daily devotionals.
+    Free during preview period; ~$0.25/month after preview ends.
+    Fallback keys: set GEMINI_API_KEY_2 / GEMINI_API_KEY_3 in Railway Variables.
     """
-    if not settings.openai_api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured in Railway Variables")
+    import asyncio, base64
 
-    resp = await http.post(
-        "https://api.openai.com/v1/audio/speech",
-        headers={
-            "Authorization": f"Bearer {settings.openai_api_key}",
-            "Content-Type":  "application/json",
-        },
-        json={
-            "model":           "tts-1-hd",
-            "input":           script,
-            "voice":           "nova",   # warm, natural, expressive — most human-sounding
-            "response_format": "mp3",
-            "speed":           0.92,     # slightly slower for devotional pacing
-        },
-        timeout=60,
+    keys = [k for k in [
+        settings.gemini_api_key_henokrobale,
+        settings.gemini_api_key_eeccaustinchurch,
+        settings.gemini_api_key_eeccaustinapp,
+    ] if k]
+
+    if not keys:
+        raise HTTPException(status_code=503, detail="No GEMINI_API_KEY configured in Railway Variables")
+
+    url_template = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash-preview-tts:generateContent?key={key}"
     )
+    payload = {
+        "contents": [{"parts": [{"text": script}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
+        },
+    }
 
-    if resp.status_code == 429:
-        raise HTTPException(status_code=429, detail="OpenAI TTS rate limited — retry in a moment")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"OpenAI TTS error {resp.status_code}: {resp.text[:300]}")
+    for i, key in enumerate(keys):
+        label = f"key {i+1}/{len(keys)}"
+        resp  = await http.post(url_template.format(key=key), json=payload, timeout=90)
 
-    # resp.content IS the MP3 — return it directly, no further processing
-    return resp.content
+        if resp.status_code == 200:
+            part      = resp.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+            mime_type = part.get("mimeType", "audio/wav")
+            raw_bytes = base64.b64decode(part["data"])
+            print(f"[VOTD] Gemini TTS success with {label} — {len(raw_bytes):,} bytes ({mime_type})")
+            return _wav_to_mp3(raw_bytes, mime_type)
+
+        if resp.status_code == 429:
+            print(f"[VOTD] Gemini TTS 429 on {label} — {'trying next key' if i+1 < len(keys) else 'all keys exhausted'}")
+            if i + 1 < len(keys):
+                await asyncio.sleep(2)   # brief pause before next key
+                continue
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini TTS error {resp.status_code} on {label}: {resp.text[:300]}",
+        )
+
+    raise HTTPException(status_code=429, detail="All Gemini API keys quota-exhausted — add more keys or wait until midnight")
+
+
+def _wav_to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
+    """Converts Gemini WAV/PCM output → MP3 via ffmpeg. Skips if already MP3/MPEG."""
+    import os, subprocess, tempfile, base64
+
+    if "mp3" in mime_type.lower() or "mpeg" in mime_type.lower():
+        return audio_bytes  # already MP3 — pass straight through
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".input") as f:
+        f.write(audio_bytes)
+        in_path = f.name
+
+    out_path = in_path + ".mp3"
+    try:
+        cmd = (
+            ["ffmpeg", "-y", "-i", in_path, "-b:a", "128k", out_path]
+            if "wav" in mime_type.lower()
+            else ["ffmpeg", "-y", "-f", "s16le", "-ar", "24000", "-ac", "1",
+                  "-i", in_path, "-b:a", "128k", out_path]
+        )
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg: {result.stderr.decode()[-300:]}")
+        with open(out_path, "rb") as fmp3:
+            return fmp3.read()
+    finally:
+        os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
 
 
 def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
