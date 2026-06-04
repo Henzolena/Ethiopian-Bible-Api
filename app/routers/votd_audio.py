@@ -234,13 +234,10 @@ async def _full_pipeline(today_str: str, http: httpx.AsyncClient) -> tuple[str, 
     # 5. Generate devotional script
     script = await _generate_script(ref, text, http)
 
-    # 6. Gemini TTS → audio bytes
-    audio_bytes, mime_type = await _generate_audio(script, http)
+    # 6. OpenAI TTS → MP3 bytes (ready to upload, no conversion needed)
+    mp3_bytes = await _generate_audio(script, http)
 
-    # 7. Convert to MP3
-    mp3_bytes = _to_mp3(audio_bytes, mime_type)
-
-    # 8. Upload to Supabase Storage
+    # 7. Upload to Supabase Storage
     audio_url = await _upload_audio(http, today_str, mp3_bytes)
 
     # 9. Mark ready
@@ -371,11 +368,13 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
 
 # ── AI: Gemini TTS ────────────────────────────────────────────────────────────
 
-async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, str]:
+async def _generate_audio(script: str, http: httpx.AsyncClient) -> bytes:
     """
-    Calls OpenAI TTS-1-HD (onyx voice) and returns (mp3_bytes, "audio/mpeg").
-    Response is MP3 directly — no base64 decoding or ffmpeg conversion needed.
-    Cost: ~$0.030 per 1K characters (~$1.08/month for 30 daily clips).
+    Calls OpenAI TTS-1-HD and returns raw MP3 bytes ready for upload.
+    No conversion, no ffmpeg — OpenAI returns a completed MP3 directly.
+
+    Voice: nova — warm, natural, expressive. Most human-sounding OpenAI voice.
+    Cost: ~$0.030/1K chars ≈ $1.08/month for 30 daily devotionals.
     """
     if not settings.openai_api_key:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured in Railway Variables")
@@ -389,9 +388,9 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, 
         json={
             "model":           "tts-1-hd",
             "input":           script,
-            "voice":           "onyx",        # deep, warm, authoritative — ideal for devotionals
+            "voice":           "nova",   # warm, natural, expressive — most human-sounding
             "response_format": "mp3",
-            "speed":           0.92,          # slightly slower pace suits devotional listening
+            "speed":           0.92,     # slightly slower for devotional pacing
         },
         timeout=60,
     )
@@ -401,7 +400,8 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> tuple[bytes, 
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"OpenAI TTS error {resp.status_code}: {resp.text[:300]}")
 
-    return resp.content, "audio/mpeg"  # already MP3 — _to_mp3 passes it straight through
+    # resp.content IS the MP3 — return it directly, no further processing
+    return resp.content
 
 
 def _to_mp3(audio_bytes: bytes, mime_type: str) -> bytes:
