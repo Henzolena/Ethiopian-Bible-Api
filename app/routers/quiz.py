@@ -546,7 +546,11 @@ async def _translate_with_gemini(
     Native verse text is provided so Gemini can use canonical terminology.
     Returns translated question dicts or None on failure.
     """
-    if not settings.gemini_api_key:
+    # Use the first available Gemini key (same rotation as VOTD audio)
+    gemini_key = (settings.gemini_api_key_henokrobale
+                  or settings.gemini_api_key_eeccaustinchurch
+                  or settings.gemini_api_key_eeccaustinapp)
+    if not gemini_key:
         return None
 
     lang_name   = _LANG_NAMES.get(target_lang, target_lang.upper())
@@ -569,7 +573,7 @@ async def _translate_with_gemini(
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
+        f"{settings.gemini_model}:generateContent?key={gemini_key}"
     )
 
     try:
