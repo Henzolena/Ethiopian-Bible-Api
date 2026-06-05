@@ -764,14 +764,14 @@ async def generate_all_languages(
     else:
         generated[lang] = len(en_raw)
 
-    # ── Step 3: fetch native verses + translate in parallel ───────────────────
-    am_verses, or_verses, ti_verses = await asyncio.gather(
-        _fetch_chapter_verses("am", b.id, req.chapter, db),
-        _fetch_chapter_verses("or", b.id, req.chapter, db),
-        _fetch_chapter_verses("ti", b.id, req.chapter, db),
-    )
+    # ── Step 3: fetch native verses SEQUENTIALLY (SQLAlchemy async session is
+    # not safe to share across concurrent coroutines in asyncio.gather) ────────
+    am_verses = await _fetch_chapter_verses("am", b.id, req.chapter, db)
+    or_verses = await _fetch_chapter_verses("or", b.id, req.chapter, db)
+    ti_verses = await _fetch_chapter_verses("ti", b.id, req.chapter, db)
     native_map = {"am": am_verses, "or": or_verses, "ti": ti_verses}
 
+    # Gemini translations run in parallel — they make no DB calls so it's safe
     translation_tasks = {
         tl: _translate_with_gemini(en_raw, tl, b.english_name, req.chapter, nvs)
         for tl, nvs in native_map.items()
