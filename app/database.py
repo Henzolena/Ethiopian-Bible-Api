@@ -39,3 +39,16 @@ async def get_db() -> AsyncSession:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Safe column migration — adds group_id if it doesn't exist yet
+        await conn.execute(
+            __import__("sqlalchemy").text(
+                "ALTER TABLE quiz_questions "
+                "ADD COLUMN IF NOT EXISTS group_id VARCHAR(36);"
+            )
+        )
+        await conn.execute(
+            __import__("sqlalchemy").text(
+                "CREATE INDEX IF NOT EXISTS ix_quiz_group_id "
+                "ON quiz_questions(group_id);"
+            )
+        )

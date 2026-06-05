@@ -76,6 +76,9 @@ class QuizQuestion(Base):
     __tablename__ = "quiz_questions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # group_id links the SAME question across all language translations.
+    # All 4 language versions of question N share the same group_id UUID.
+    group_id      = Column(String(36), nullable=True, index=True)
 
     # Location
     book_id       = Column(Integer, ForeignKey("books.id"), nullable=False)

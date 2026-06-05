@@ -69,6 +69,7 @@ class QuizOption(BaseModel):
 
 class QuizQuestionOut(BaseModel):
     """A single Bible trivia question with all answer choices."""
+    group_id: Optional[str] = None  # shared across all language translations of this question
     id: int
     book: str           = Field(description="Book abbreviation e.g. GEN")
     book_name: str      = Field(description="Full English book name e.g. Genesis")
