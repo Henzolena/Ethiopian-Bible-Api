@@ -14,6 +14,7 @@ Endpoints:
   GET  /api/v1/quiz/{lang}/books/{book}/{chapter}/{verse}
 """
 
+import asyncio
 import json
 import re
 from typing import Optional
@@ -28,6 +29,8 @@ from app.config import settings
 from app.database import get_db
 from app.models import Book, Language, QuizQuestion, Verse
 from app.schemas import (
+    GenerateAllLanguagesRequest,
+    GenerateAllLanguagesResponse,
     GenerateQuizRequest,
     GenerateQuizResponse,
     QuizAnswerResult,
@@ -498,6 +501,243 @@ async def generate_questions(
         generated=len(new_questions),
         saved=saved,
         questions=[_to_out(q, b) for q in new_questions],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-language generation helpers
+# ---------------------------------------------------------------------------
+
+_LANG_NAMES = {
+    "am":  "Amharic (አማርኛ)",
+    "or":  "Oromo (Afaan Oromoo)",
+    "ti":  "Tigrigna (ትግርኛ)",
+    "en":  "English (KJV)",
+    "niv": "English (NIV)",
+}
+
+_TRANSLATION_LANGUAGES = ["am", "or", "ti"]   # non-English targets
+
+
+async def _fetch_chapter_verses(
+    lang: str, book_id: int, chapter: int, db: AsyncSession
+) -> list[dict]:
+    """Returns [{verse: int, text: str}, ...] for a given language + book + chapter."""
+    code = lang.lower()
+    rows = (await db.execute(
+        select(Verse)
+        .join(Language, Verse.language_id == Language.id)
+        .where(Verse.book_id == book_id, Language.code == code, Verse.chapter == chapter)
+        .order_by(Verse.verse)
+    )).scalars().all()
+    return [{"verse": v.verse, "text": v.text} for v in rows]
+
+
+async def _translate_with_gemini(
+    english_questions: list[dict],
+    target_lang: str,
+    book_name: str,
+    chapter: int,
+    native_verses: list[dict],
+) -> list[dict] | None:
+    """
+    Use Gemini to translate English quiz questions into the target language.
+    Native verse text is provided so Gemini can use canonical terminology.
+    Returns translated question dicts or None on failure.
+    """
+    if not settings.gemini_api_key:
+        return None
+
+    lang_name   = _LANG_NAMES.get(target_lang, target_lang.upper())
+    verses_block = "\n".join(f"  {v['verse']}: {v['text']}" for v in native_verses)
+    eq_json     = json.dumps(english_questions, ensure_ascii=False, indent=2)
+
+    prompt = (
+        f"Translate the following Bible quiz questions from English into {lang_name}.\n\n"
+        f"Native {lang_name} Bible text for {book_name} chapter {chapter} "
+        f"(use this as your reference for names, places, and terminology):\n"
+        f"{verses_block}\n\n"
+        f"English questions (JSON):\n{eq_json}\n\n"
+        f"TRANSLATION RULES:\n"
+        f"- Translate ALL text fields: question, option_a, option_b, option_c, option_d, explanation\n"
+        f"- Do NOT change: correct_answer (A/B/C/D), verse_start, verse_end, difficulty\n"
+        f"- Use natural, fluent {lang_name} — not word-for-word literal translation\n"
+        f"- Use terminology from the native Bible text above for consistency\n"
+        f"- Return ONLY a JSON object: {{\"questions\": [ ... same structure ... ]}}\n"
+    )
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=90) as http:
+            resp = await http.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.3,
+                        "maxOutputTokens": 8192,
+                    },
+                },
+            )
+        if resp.status_code != 200:
+            print(f"[QuizML] Gemini {resp.status_code} for {target_lang}: {resp.text[:200]}")
+            return None
+
+        content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        data    = json.loads(content)
+        qs      = data.get("questions", data) if isinstance(data, dict) else data
+        return qs if isinstance(qs, list) else None
+
+    except Exception as exc:
+        print(f"[QuizML] Translation failed for {target_lang}: {exc}")
+        return None
+
+
+async def _save_questions(
+    raw_questions: list[dict],
+    book: Book,
+    chapter: int,
+    lang: str,
+    verse_start: int | None,
+    verse_end: int | None,
+    author: str,
+    db: AsyncSession,
+) -> int:
+    """Inserts translated/generated questions into the DB. Returns count saved."""
+    rows = []
+    for rq in raw_questions:
+        vs = rq.get("verse_start") or verse_start
+        ve = rq.get("verse_end") or verse_end or vs
+        q  = rq.get("question", "").strip()
+        oa = rq.get("option_a", "").strip()
+        ob = rq.get("option_b", "").strip()
+        oc = rq.get("option_c", "").strip()
+        od = rq.get("option_d", "").strip()
+        if not (q and oa and ob and oc and od):
+            continue
+        rows.append(QuizQuestion(
+            book_id=book.id,
+            language_code=lang,
+            chapter=chapter,
+            verse_start=vs, verse_end=ve,
+            question=q, option_a=oa, option_b=ob, option_c=oc, option_d=od,
+            correct_answer=str(rq.get("correct_answer", "A")).strip().upper()[0],
+            explanation=rq.get("explanation"),
+            difficulty=rq.get("difficulty", "beginner"),
+            source="ai_generated",
+            author=author,
+            is_verified=False,
+        ))
+    if rows:
+        db.add_all(rows)
+        await db.flush()
+        await db.commit()
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Multi-language generation endpoint
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/generate-all-languages",
+    response_model=GenerateAllLanguagesResponse,
+    summary="Generate quiz questions in EN + AM + OR + TI simultaneously",
+)
+async def generate_all_languages(
+    req: GenerateAllLanguagesRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generates quiz questions for all 4 Bible languages in one call:
+
+    1. Validates book + chapter.
+    2. Generates English (NIV) questions using Mistral (primary quality source).
+    3. In parallel: fetches native verse text for AM, OR, TI and uses Gemini
+       to translate the English questions into each language.
+    4. Saves all language versions to the database.
+
+    After this call, users can switch between AM/EN/OR/TI in the quiz UI
+    and always get questions for the chapter.
+    """
+    b    = await _resolve_book(req.book, db)
+    lang = "niv"   # always generate from NIV as the English source
+
+    if req.chapter < 1 or req.chapter > b.chapter_count:
+        raise _quiz_error(
+            400, "CHAPTER_OUT_OF_RANGE",
+            f"{b.english_name} only has {b.chapter_count} chapters.",
+            f"Use a chapter between 1 and {b.chapter_count}.",
+        )
+
+    # ── Step 1: fetch English verse text and generate questions ──────────────
+    en_verses = await _fetch_chapter_verses(lang, b.id, req.chapter, db)
+    if not en_verses:
+        raise _quiz_error(
+            404, "NO_VERSE_TEXT",
+            f"No NIV text found for {b.english_name} {req.chapter}.",
+            "Ensure the NIV translation is seeded in the database.",
+        )
+
+    prompt      = _build_prompt(
+        book_name=b.english_name, chapter=req.chapter,
+        verse_start=None, verse_end=None,
+        verses_text=en_verses, count=req.count,
+        difficulty=req.difficulty or "mixed", language="NIV",
+    )
+    en_raw      = await _call_mistral(prompt)
+    generated   = {}
+    errors      = {}
+
+    if req.save:
+        saved_en = await _save_questions(en_raw, b, req.chapter, lang, None, None, "Mistral AI", db)
+        generated[lang] = saved_en
+    else:
+        generated[lang] = len(en_raw)
+
+    # ── Step 2: fetch native verses for all 3 target languages in parallel ──
+    am_verses, or_verses, ti_verses = await asyncio.gather(
+        _fetch_chapter_verses("am", b.id, req.chapter, db),
+        _fetch_chapter_verses("or", b.id, req.chapter, db),
+        _fetch_chapter_verses("ti", b.id, req.chapter, db),
+    )
+
+    native_verses_map = {"am": am_verses, "or": or_verses, "ti": ti_verses}
+
+    # ── Step 3: translate in parallel using Gemini ───────────────────────────
+    translation_tasks = {
+        tl: _translate_with_gemini(en_raw, tl, b.english_name, req.chapter, nvs)
+        for tl, nvs in native_verses_map.items()
+        if nvs   # skip languages with no verse text in DB
+    }
+
+    results = await asyncio.gather(*translation_tasks.values(), return_exceptions=True)
+    translated = dict(zip(translation_tasks.keys(), results))
+
+    # ── Step 4: save translations ─────────────────────────────────────────────
+    for tl, qs in translated.items():
+        if isinstance(qs, Exception) or not qs:
+            errors[tl] = str(qs) if isinstance(qs, Exception) else "empty response"
+            generated[tl] = 0
+            continue
+        if req.save:
+            cnt = await _save_questions(qs, b, req.chapter, tl, None, None, "Gemini AI", db)
+            generated[tl] = cnt
+        else:
+            generated[tl] = len(qs)
+
+    return GenerateAllLanguagesResponse(
+        book=b.abbreviation,
+        book_name=b.english_name,
+        chapter=req.chapter,
+        generated_per_language=generated,
+        saved=req.save,
+        errors=errors,
     )
 
 

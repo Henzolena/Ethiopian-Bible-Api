@@ -137,6 +137,30 @@ class GenerateQuizResponse(BaseModel):
     questions: list[QuizQuestionOut]
 
 
+class GenerateAllLanguagesRequest(BaseModel):
+    """Generate quiz questions for all 4 languages in one call."""
+    book:       str = Field(description="Book abbreviation e.g. EPH, PSA")
+    chapter:    int = Field(ge=1, description="Chapter number")
+    count:      int = Field(5, ge=1, le=10, description="Questions per language (1–10)")
+    difficulty: Optional[Literal["beginner", "intermediate", "advanced", "mixed"]] = Field("mixed")
+    save:       bool = Field(True, description="Persist all language versions to DB")
+
+    @field_validator("book")
+    @classmethod
+    def upper_book(cls, v: str) -> str:
+        return v.upper()
+
+
+class GenerateAllLanguagesResponse(BaseModel):
+    """Summary of multi-language quiz generation."""
+    book:       str
+    book_name:  str
+    chapter:    int
+    generated_per_language: dict   # {"niv": 5, "am": 5, "or": 4, "ti": 5}
+    saved:      bool
+    errors:     dict = {}          # {"or": "timeout"} — partial failures logged here
+
+
 class QuizAnswerSubmit(BaseModel):
     """Client submits an answer; API returns correctness + explanation."""
     question_id: int
