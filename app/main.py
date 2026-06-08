@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
-from app.routers import languages, books, verses, search, audio, coverage, quiz, votd_audio
+from app.routers import languages, books, verses, search, audio, coverage, quiz, votd_audio, study_guide, mezmur
 
 app = FastAPI(
     title=settings.api_title,
@@ -88,6 +88,7 @@ async def root():
             "quiz_generate": "POST /api/v1/quiz/generate",
             "quiz_answer": "POST /api/v1/quiz/answer",
             "quiz_stats": "/api/v1/quiz/stats",
+            "study_guide_generate": "POST /api/v1/study-guide/generate",
         },
     })
 
@@ -102,10 +103,12 @@ PREFIX = "/api/v1"
 # routers (verses, books, search, audio).  FastAPI uses first-match routing, so
 # specific prefixes (/quiz/*, /coverage/*) must win over wildcard /{lang}/*.
 app.include_router(languages.router,   prefix=PREFIX)
-app.include_router(coverage.router,   prefix=PREFIX)
-app.include_router(quiz.router,       prefix=PREFIX)
-app.include_router(votd_audio.router, prefix=PREFIX)   # must be before /{lang}/... routers
-app.include_router(books.router,      prefix=PREFIX)
-app.include_router(verses.router,     prefix=PREFIX)
-app.include_router(search.router,     prefix=PREFIX)
-app.include_router(audio.router,      prefix=PREFIX)
+app.include_router(coverage.router,    prefix=PREFIX)
+app.include_router(quiz.router,        prefix=PREFIX)
+app.include_router(votd_audio.router,  prefix=PREFIX)
+app.include_router(study_guide.router, prefix=PREFIX)
+app.include_router(mezmur.router,      prefix=PREFIX)   # /api/v1/mezmur/*
+app.include_router(books.router,       prefix=PREFIX)
+app.include_router(verses.router,      prefix=PREFIX)
+app.include_router(search.router,      prefix=PREFIX)
+app.include_router(audio.router,       prefix=PREFIX)

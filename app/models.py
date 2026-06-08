@@ -113,3 +113,85 @@ class QuizQuestion(Base):
         Index("ix_quiz_difficulty",   "difficulty"),
         Index("ix_quiz_source",       "source"),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MEZMUR MODULE — Ethiopian Christian Songs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MezmurArtist(Base):
+    """Singer / artist (ዘማሪ).
+    Sources: 'online' (onlinemezmur.com), 'wiki' (wikimezmur.org), 'both'.
+    """
+    __tablename__ = "mezmur_artists"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    name             = Column(String(300), nullable=False)
+    name_normalized  = Column(String(300), nullable=False)   # lowercase, spaces, for dedup
+    source           = Column(String(10),  nullable=False)   # online | wiki | both
+    online_encoded   = Column(String(600))                   # URL-encoded name for singer_songs.php
+    wiki_path        = Column(String(600))                   # /am/Artist_Name path segment
+    song_count       = Column(Integer, default=0)
+
+    albums = relationship("MezmurAlbum", back_populates="artist", cascade="all, delete-orphan")
+    songs  = relationship("MezmurSong",  back_populates="artist", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("name_normalized", name="uq_mezmur_artist_name"),
+        Index("ix_mezmur_artist_norm", "name_normalized"),
+        Index("ix_mezmur_artist_source", "source"),
+    )
+
+
+class MezmurAlbum(Base):
+    """Album from wikimezmur.org (3-level hierarchy Artist → Album → Track).
+    onlinemezmur.com does not expose albums; those songs appear directly under artist.
+    """
+    __tablename__ = "mezmur_albums"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    artist_id   = Column(Integer, ForeignKey("mezmur_artists.id", ondelete="CASCADE"), nullable=False)
+    title       = Column(String(400), nullable=False)
+    wiki_slug   = Column(String(600))   # e.g. "Memheru_Vol3" (2nd path segment)
+    track_count = Column(Integer, default=0)
+
+    artist = relationship("MezmurArtist", back_populates="albums")
+    tracks = relationship("MezmurSong",   back_populates="album")
+
+    __table_args__ = (
+        UniqueConstraint("artist_id", "wiki_slug", name="uq_mezmur_album"),
+        Index("ix_mezmur_album_artist", "artist_id"),
+    )
+
+
+class MezmurSong(Base):
+    """Individual song / track (ዜማ).
+    Structured lyrics stored as a JSON array in lyrics_json:
+      [{"type":"verse","label":"ቁጥር ፩","sort_order":0,
+        "lyrics_am":"...","lyrics_en":"..."},
+       {"type":"chorus","label":"ኮረስ","sort_order":1,
+        "lyrics_am":"...","lyrics_en":"..."}]
+    arrangement is a comma-separated key list: "v1,c,v2,c,b,c"
+    """
+    __tablename__ = "mezmur_songs"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    artist_id   = Column(Integer, ForeignKey("mezmur_artists.id", ondelete="CASCADE"), nullable=False)
+    album_id    = Column(Integer, ForeignKey("mezmur_albums.id",  ondelete="SET NULL"), nullable=True)
+    title       = Column(String(400), nullable=False)
+    source      = Column(String(10),  nullable=False)   # online | wiki
+    source_id   = Column(String(600), nullable=False)   # song_id or wiki full path
+    lyrics_json = Column(Text, nullable=True)           # structured JSON (see above)
+    arrangement = Column(String(500), nullable=True)    # "v1,c,v2,c"
+    has_lyrics  = Column(Boolean, default=False)        # True once lyrics fetched
+
+    artist = relationship("MezmurArtist", back_populates="songs")
+    album  = relationship("MezmurAlbum",  back_populates="tracks")
+
+    __table_args__ = (
+        UniqueConstraint("source", "source_id", name="uq_mezmur_song"),
+        Index("ix_mezmur_song_artist",  "artist_id"),
+        Index("ix_mezmur_song_album",   "album_id"),
+        Index("ix_mezmur_song_source",  "source", "source_id"),
+        Index("ix_mezmur_song_lyrics",  "has_lyrics"),
+    )
