@@ -141,17 +141,10 @@ async def get_today():
     today_str = date.today().isoformat()
     async with httpx.AsyncClient(timeout=15) as http:
         row = await _get_row(http, today_str)
+        if not _row_has_verse(row):
+            row = await _ensure_today_verse(http, today_str, row)
 
-    verse = None
-    if row and row.get("verse_ref") and row.get("verse_text"):
-        verse = {
-            "book":      row.get("book", ""),
-            "book_name": _book_name(row.get("verse_ref", "")),
-            "chapter":   row.get("chapter", 0),
-            "verse":     row.get("verse", 0),
-            "text":      row.get("verse_text", ""),
-            "language":  "niv",
-        }
+    verse = _row_to_verse(row)
 
     return {
         "verse":        verse,
@@ -182,6 +175,11 @@ async def request_votd_audio(background_tasks: BackgroundTasks):
         if row and row.get("audio_status") == "generating":
             return {"status": "generating", "poll_interval_seconds": 5}
 
+        if not _row_has_verse(row):
+            row = await _ensure_today_verse(http, today_str, row)
+            if not _row_has_verse(row):
+                return {"status": "unavailable"}
+
         # Mark generating synchronously so the next concurrent call sees it
         try:
             await _mark_generating(http, today_str)
@@ -200,30 +198,41 @@ async def _full_pipeline(today_str: str, http: httpx.AsyncClient) -> tuple[str, 
     The caller is responsible for marking "generating" before calling and
     "failed" on exception.
     """
-    # 1. Fetch all previous verse refs for deduplication
-    used_refs = await _get_used_refs(http)
-    used_set  = {r.strip().lower() for r in used_refs if r}
+    existing_row = await _get_row(http, today_str)
+    if _row_has_verse(existing_row):
+        verse = {
+            "book":      existing_row.get("book", ""),
+            "book_name": _book_name(existing_row.get("verse_ref", "")),
+            "chapter":   existing_row.get("chapter", 0),
+            "verse":     existing_row.get("verse", 0),
+            "text":      existing_row.get("verse_text", ""),
+        }
+        print(f"[VOTD] Reusing selected verse {existing_row.get('verse_ref')}")
+    else:
+        # 1. Fetch all previous verse refs for deduplication
+        used_refs = await _get_used_refs(http)
+        used_set  = {r.strip().lower() for r in used_refs if r}
 
-    # 2 + 3. Pick from curated pool, skipping already-used verses
-    verse = None
-    import hashlib
-    day_hash = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
-    pool     = list(_VERSE_POOL)
-    start    = day_hash % len(pool)
-    ordered  = pool[start:] + pool[:start]
+        # 2 + 3. Pick from curated pool, skipping already-used verses
+        verse = None
+        import hashlib
+        day_hash = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
+        pool     = list(_VERSE_POOL)
+        start    = day_hash % len(pool)
+        ordered  = pool[start:] + pool[:start]
 
-    for entry in ordered:
-        candidate = {"book": entry[0], "chapter": entry[1], "verse": entry[2]}
-        v = await _fetch_verse_niv(http, candidate["book"], candidate["chapter"], candidate["verse"])
-        if not v:
-            continue
-        candidate_ref = f"{v['book_name']} {v['chapter']}:{v['verse']}"
-        if candidate_ref.strip().lower() in used_set:
-            print(f"[VOTD] ⏭  {candidate_ref} already used — trying next in pool")
-            continue
-        verse = v
-        print(f"[VOTD] ✅ Selected {candidate_ref}")
-        break
+        for entry in ordered:
+            candidate = {"book": entry[0], "chapter": entry[1], "verse": entry[2]}
+            v = await _fetch_verse_niv(http, candidate["book"], candidate["chapter"], candidate["verse"])
+            if not v:
+                continue
+            candidate_ref = f"{v['book_name']} {v['chapter']}:{v['verse']}"
+            if candidate_ref.strip().lower() in used_set:
+                print(f"[VOTD] ⏭  {candidate_ref} already used — trying next in pool")
+                continue
+            verse = v
+            print(f"[VOTD] ✅ Selected {candidate_ref}")
+            break
 
     if not verse:
         raise HTTPException(status_code=502, detail="All curated verses have been used — expand the pool")
@@ -262,6 +271,72 @@ async def _run_background(today_str: str) -> None:
                     await _update_status(h, today_str, None, "failed")
             except Exception:
                 pass
+
+
+# ── Public VOTD verse helpers ─────────────────────────────────────────────────
+
+def _row_has_verse(row: dict | None) -> bool:
+    return bool(row and row.get("verse_ref") and row.get("verse_text"))
+
+
+def _row_to_verse(row: dict | None) -> dict | None:
+    if not _row_has_verse(row):
+        return None
+    return {
+        "book":      row.get("book", ""),
+        "book_name": _book_name(row.get("verse_ref", "")),
+        "chapter":   row.get("chapter", 0),
+        "verse":     row.get("verse", 0),
+        "text":      row.get("verse_text", ""),
+        "language":  "niv",
+    }
+
+
+async def _ensure_today_verse(
+    http: httpx.AsyncClient,
+    today_str: str,
+    row: dict | None,
+) -> dict | None:
+    """
+    Ensures /today can return a verse even before audio generation finishes.
+    Audio status is preserved so this does not accidentally mark audio ready or
+    generating.
+    """
+    if _row_has_verse(row):
+        return row
+
+    used_refs = await _get_used_refs(http)
+    used_set = {r.strip().lower() for r in used_refs if r}
+
+    import hashlib
+    day_hash = int(hashlib.md5(today_str.encode()).hexdigest(), 16)
+    pool = list(_VERSE_POOL)
+    start = day_hash % len(pool)
+    ordered = pool[start:] + pool[:start]
+
+    for entry in ordered:
+        verse = await _fetch_verse_niv(http, entry[0], entry[1], entry[2])
+        if not verse:
+            continue
+
+        ref = f"{verse['book_name']} {verse['chapter']}:{verse['verse']}"
+        if ref.strip().lower() in used_set:
+            continue
+
+        audio_status = (row or {}).get("audio_status") or "pending"
+        await _upsert_verse(
+            http,
+            today_str,
+            ref,
+            verse["book"],
+            verse["chapter"],
+            verse["verse"],
+            verse["text"],
+            audio_status=audio_status,
+        )
+        return await _get_row(http, today_str)
+
+    return row
 
 
 # ── AI: verse selection ───────────────────────────────────────────────────────
@@ -384,9 +459,13 @@ async def _generate_audio(script: str, http: httpx.AsyncClient) -> bytes:
     import asyncio, base64
 
     keys = [k for k in [
+        settings.gemini_api_key,
         settings.gemini_api_key_henokrobale,
         settings.gemini_api_key_eeccaustinchurch,
         settings.gemini_api_key_eeccaustinapp,
+        settings.gemini_api_key_henzolinasj,
+        settings.gemini_api_key_harmonikahn,
+        settings.gemini_api_key_robalehenok,
     ] if k]
 
     if not keys:
@@ -536,6 +615,7 @@ async def _upsert_verse(
     http: httpx.AsyncClient,
     date_str: str, ref: str, book: str,
     chapter: int, verse: int, text: str,
+    audio_status: str = "generating",
 ) -> None:
     """Writes the real verse data into the row (overwrites placeholder defaults)."""
     r = await http.post(
@@ -544,7 +624,7 @@ async def _upsert_verse(
             "date": date_str, "verse_ref": ref, "book": book,
             "chapter": chapter, "verse": verse,
             "verse_text": text, "translation": "NIV",
-            "audio_status": "generating",
+            "audio_status": audio_status,
         },
         headers={**_sb_write_headers(), "Prefer": "resolution=merge-duplicates"},
     )

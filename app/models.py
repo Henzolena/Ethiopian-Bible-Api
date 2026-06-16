@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, UniqueConstraint, ForeignKey, Index, DateTime
+from sqlalchemy import Column, Integer, String, Text, Boolean, UniqueConstraint, ForeignKey, Index, DateTime, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -121,12 +121,13 @@ class QuizQuestion(Base):
 
 class MezmurArtist(Base):
     """Singer / artist (ዘማሪ).
-    Sources: 'online' (onlinemezmur.com), 'wiki' (wikimezmur.org), 'both'.
+    Sources: 'mezmuroch', 'online', 'wiki', 'both', or 'multiple'.
     """
     __tablename__ = "mezmur_artists"
 
     id               = Column(Integer, primary_key=True, index=True)
     name             = Column(String(300), nullable=False)
+    name_am          = Column(String(300), nullable=True)
     name_normalized  = Column(String(300), nullable=False)   # lowercase, spaces, for dedup
     source           = Column(String(10),  nullable=False)   # online | wiki | both
     online_encoded   = Column(String(600))                   # URL-encoded name for singer_songs.php
@@ -152,6 +153,7 @@ class MezmurAlbum(Base):
     id          = Column(Integer, primary_key=True, index=True)
     artist_id   = Column(Integer, ForeignKey("mezmur_artists.id", ondelete="CASCADE"), nullable=False)
     title       = Column(String(400), nullable=False)
+    title_am    = Column(String(400), nullable=True)
     wiki_slug   = Column(String(600))   # e.g. "Memheru_Vol3" (2nd path segment)
     track_count = Column(Integer, default=0)
 
@@ -179,7 +181,9 @@ class MezmurSong(Base):
     artist_id   = Column(Integer, ForeignKey("mezmur_artists.id", ondelete="CASCADE"), nullable=False)
     album_id    = Column(Integer, ForeignKey("mezmur_albums.id",  ondelete="SET NULL"), nullable=True)
     title       = Column(String(400), nullable=False)
-    source      = Column(String(10),  nullable=False)   # online | wiki
+    title_am    = Column(String(400), nullable=True)
+    language    = Column(String(10), nullable=False, default="am")  # am | en
+    source      = Column(String(10),  nullable=False)   # mezmuroch | online | wiki
     source_id   = Column(String(600), nullable=False)   # song_id or wiki full path
     lyrics_json = Column(Text, nullable=True)           # structured JSON (see above)
     arrangement = Column(String(500), nullable=True)    # "v1,c,v2,c"
@@ -192,6 +196,47 @@ class MezmurSong(Base):
         UniqueConstraint("source", "source_id", name="uq_mezmur_song"),
         Index("ix_mezmur_song_artist",  "artist_id"),
         Index("ix_mezmur_song_album",   "album_id"),
+        Index("ix_mezmur_song_language", "language"),
         Index("ix_mezmur_song_source",  "source", "source_id"),
         Index("ix_mezmur_song_lyrics",  "has_lyrics"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FONT MODULE — Ethiopic font catalogue for presentation clients
+# ─────────────────────────────────────────────────────────────────────────────
+
+class EthiopicFont(Base):
+    """Self-hosted font file plus metadata for Bible/presentation clients.
+
+    The binary is stored in the database so Railway can serve a stable public
+    font API without needing a separate object-storage bucket.
+    """
+    __tablename__ = "ethiopic_fonts"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    slug           = Column(String(180), nullable=False, unique=True)
+    family_name    = Column(String(240), nullable=False)
+    display_name   = Column(String(300), nullable=False)
+    style_name     = Column(String(120), nullable=False, default="Regular")
+    weight         = Column(Integer, nullable=False, default=400)
+    is_italic      = Column(Boolean, nullable=False, default=False)
+    format         = Column(String(12), nullable=False)
+    mime_type      = Column(String(80), nullable=False)
+    file_name      = Column(String(300), nullable=False)
+    file_size      = Column(Integer, nullable=False)
+    sha256         = Column(String(64), nullable=False, index=True)
+    data           = Column(LargeBinary, nullable=False)
+    supports_ethiopic = Column(Boolean, nullable=False, default=True)
+    license_name   = Column(Text, nullable=True)
+    license_url    = Column(Text, nullable=True)
+    source         = Column(Text, nullable=False, default="local-font-folder")
+    is_active      = Column(Boolean, nullable=False, default=True)
+    created_at     = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at     = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("ix_ethiopic_font_family", "family_name"),
+        Index("ix_ethiopic_font_active", "is_active"),
+        Index("ix_ethiopic_font_weight", "weight"),
     )

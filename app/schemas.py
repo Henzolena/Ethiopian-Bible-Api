@@ -58,6 +58,40 @@ class APIInfo(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Font Schemas
+# ---------------------------------------------------------------------------
+
+class FontOut(BaseModel):
+    slug: str
+    family_name: str
+    display_name: str
+    style_name: str
+    weight: int
+    is_italic: bool
+    format: str
+    mime_type: str
+    file_name: str
+    file_size: int
+    sha256: str
+    supports_ethiopic: bool
+    license_name: Optional[str] = None
+    license_url: Optional[str] = None
+    source: str
+    is_active: bool
+    css_url: Optional[str] = None
+    file_url: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class FontListOut(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    fonts: list[FontOut]
+
+
+# ---------------------------------------------------------------------------
 # Quiz / Trivia Schemas
 # ---------------------------------------------------------------------------
 

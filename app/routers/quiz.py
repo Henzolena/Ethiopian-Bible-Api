@@ -22,6 +22,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +42,31 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/quiz", tags=["Quiz & Trivia"])
+
+
+class PracticeTranslateRequest(BaseModel):
+    target_language: str = Field(description="am / or / ti")
+    book: str = Field(description="Book abbreviation e.g. MRK")
+    book_name: str = Field(description="English book name e.g. Mark")
+    chapter: int
+    verse: int
+    verse_ref: str
+    kind: str = Field(description="mcq or fill")
+    prompt: str
+    options: list[str]
+    answer_index: int
+    fill_pre: str | None = None
+    fill_post: str | None = None
+
+
+class PracticeTranslateResponse(BaseModel):
+    language: str
+    verse_ref: str
+    kind: str
+    prompt: str
+    options: list[str]
+    answer_index: int
+    verse_text: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -546,11 +572,16 @@ async def _translate_with_gemini(
     Native verse text is provided so Gemini can use canonical terminology.
     Returns translated question dicts or None on failure.
     """
-    # Use the first available Gemini key (same rotation as VOTD audio)
-    gemini_key = (settings.gemini_api_key_henokrobale
-                  or settings.gemini_api_key_eeccaustinchurch
-                  or settings.gemini_api_key_eeccaustinapp)
-    if not gemini_key:
+    keys = [k for k in [
+        settings.gemini_api_key,
+        settings.gemini_api_key_henokrobale,
+        settings.gemini_api_key_eeccaustinchurch,
+        settings.gemini_api_key_eeccaustinapp,
+        settings.gemini_api_key_henzolinasj,
+        settings.gemini_api_key_harmonikahn,
+        settings.gemini_api_key_robalehenok,
+    ] if k]
+    if not keys:
         return None
 
     lang_name   = _LANG_NAMES.get(target_lang, target_lang.upper())
@@ -571,32 +602,41 @@ async def _translate_with_gemini(
         f"- Return ONLY a JSON object: {{\"questions\": [ ... same structure ... ]}}\n"
     )
 
-    url = (
+    url_template = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent?key={gemini_key}"
+        f"{settings.gemini_model}:generateContent?key={{key}}"
     )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.3,
+            "maxOutputTokens": 8192,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
 
     try:
         async with httpx.AsyncClient(timeout=90) as http:
-            resp = await http.post(
-                url,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "temperature": 0.3,
-                        "maxOutputTokens": 8192,
-                    },
-                },
-            )
-        if resp.status_code != 200:
-            print(f"[QuizML] Gemini {resp.status_code} for {target_lang}: {resp.text[:200]}")
-            return None
+            for i, key in enumerate(keys):
+                label = f"key {i+1}/{len(keys)}"
+                resp = await http.post(url_template.format(key=key), json=payload)
 
-        content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        data    = json.loads(content)
-        qs      = data.get("questions", data) if isinstance(data, dict) else data
-        return qs if isinstance(qs, list) else None
+                if resp.status_code == 429 and i + 1 < len(keys):
+                    print(f"[QuizML] Gemini 429 for {target_lang} on {label} — trying next key")
+                    await asyncio.sleep(2)
+                    continue
+
+                if resp.status_code != 200:
+                    print(f"[QuizML] Gemini {resp.status_code} for {target_lang} on {label}: {resp.text[:200]}")
+                    return None
+
+                content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                data    = json.loads(content)
+                qs      = data.get("questions", data) if isinstance(data, dict) else data
+                return qs if isinstance(qs, list) else None
+
+        return None
 
     except Exception as exc:
         print(f"[QuizML] Translation failed for {target_lang}: {exc}")
@@ -690,6 +730,80 @@ async def get_questions_by_groups(
     id_to_q  = {q.group_id: q for q in rows}
     ordered  = [id_to_q[gid] for gid in ids if gid in id_to_q]
     return [_to_out(q, books[q.book_id]) for q in ordered]
+
+
+@router.post(
+    "/translate-practice",
+    response_model=PracticeTranslateResponse,
+    summary="Translate one local Verse Pack practice question",
+)
+async def translate_practice_question(
+    req: PracticeTranslateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Translate the exact local Verse Pack practice question currently displayed
+    in the app. This keeps the same answer index/options instead of swapping in
+    a different generated chapter question.
+    """
+    target = req.target_language.lower()
+    if target not in _TRANSLATION_LANGUAGES:
+        raise _quiz_error(400, "LANGUAGE_NOT_SUPPORTED", "Practice translation supports am, or, and ti.")
+
+    b = await _resolve_book(req.book, db)
+    if req.chapter < 1 or req.chapter > b.chapter_count:
+        raise _quiz_error(400, "CHAPTER_OUT_OF_RANGE", f"{b.english_name} only has {b.chapter_count} chapters.")
+
+    native_verses = await _fetch_chapter_verses(target, b.id, req.chapter, db)
+    native_verse_text = next((v["text"] for v in native_verses if v["verse"] == req.verse), None)
+
+    raw_question = {
+        "question": req.prompt,
+        "option_a": req.options[0] if len(req.options) > 0 else "",
+        "option_b": req.options[1] if len(req.options) > 1 else "",
+        "option_c": req.options[2] if len(req.options) > 2 else "",
+        "option_d": req.options[3] if len(req.options) > 3 else "",
+        "correct_answer": ["A", "B", "C", "D"][max(0, min(req.answer_index, 3))],
+        "verse_start": req.verse,
+        "verse_end": req.verse,
+        "difficulty": "regular",
+        "explanation": "",
+    }
+
+    translated = await _translate_with_gemini(
+        english_questions=[raw_question],
+        target_lang=target,
+        book_name=req.book_name,
+        chapter=req.chapter,
+        native_verses=native_verses,
+    )
+    if not translated:
+        raise _quiz_error(
+            502,
+            "TRANSLATION_FAILED",
+            "The practice question could not be translated right now.",
+            "Try again in a moment.",
+        )
+
+    first = translated[0]
+    translated_options = [
+        first.get("option_a", ""),
+        first.get("option_b", ""),
+        first.get("option_c", ""),
+        first.get("option_d", ""),
+    ]
+    answer_letter = str(first.get("correct_answer", raw_question["correct_answer"])).strip().upper()[:1]
+    answer_index = {"A": 0, "B": 1, "C": 2, "D": 3}.get(answer_letter, req.answer_index)
+
+    return PracticeTranslateResponse(
+        language=target,
+        verse_ref=req.verse_ref,
+        kind=req.kind,
+        prompt=first.get("question", req.prompt),
+        options=translated_options,
+        answer_index=answer_index,
+        verse_text=native_verse_text,
+    )
 
 
 @router.post(

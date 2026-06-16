@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
-from app.routers import languages, books, verses, search, audio, coverage, quiz, votd_audio, study_guide, mezmur
+from app.routers import languages, books, verses, search, audio, coverage, quiz, votd_audio, study_guide, mezmur, fonts
 
 app = FastAPI(
     title=settings.api_title,
@@ -89,6 +89,14 @@ async def root():
             "quiz_answer": "POST /api/v1/quiz/answer",
             "quiz_stats": "/api/v1/quiz/stats",
             "study_guide_generate": "POST /api/v1/study-guide/generate",
+            "mezmur_stats": "/api/v1/mezmur/stats",
+            "mezmur_artists": "/api/v1/mezmur/artists?q=bereket",
+            "mezmur_artist_songs": "/api/v1/mezmur/artists/{artist_id}/songs",
+            "mezmur_search": "/api/v1/mezmur/search?q=term",
+            "fonts": "/api/v1/fonts",
+            "fonts_css": "/api/v1/fonts.css",
+            "font_css": "/api/v1/fonts/{slug}/css",
+            "font_file": "/api/v1/fonts/{slug}/file",
         },
     })
 
@@ -108,6 +116,7 @@ app.include_router(quiz.router,        prefix=PREFIX)
 app.include_router(votd_audio.router,  prefix=PREFIX)
 app.include_router(study_guide.router, prefix=PREFIX)
 app.include_router(mezmur.router,      prefix=PREFIX)   # /api/v1/mezmur/*
+app.include_router(fonts.router,       prefix=PREFIX)   # /api/v1/fonts*
 app.include_router(books.router,       prefix=PREFIX)
 app.include_router(verses.router,      prefix=PREFIX)
 app.include_router(search.router,      prefix=PREFIX)

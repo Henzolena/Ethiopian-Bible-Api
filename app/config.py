@@ -28,10 +28,14 @@ class Settings(BaseSettings):
 
     # Gemini AI — primary TTS provider (free during preview, ~$0.25/mo after)
     # Three accounts rotate on 429 so no single quota ever blocks daily generation
+    gemini_api_key:               str = ""   # legacy/default key
     gemini_api_key_henokrobale:     str = ""   # primary
     gemini_api_key_eeccaustinchurch: str = ""  # fallback 1
     gemini_api_key_eeccaustinapp:   str = ""   # fallback 2
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_api_key_henzolinasj:     str = ""   # fallback 3
+    gemini_api_key_harmonikahn:     str = ""   # fallback 4
+    gemini_api_key_robalehenok:     str = ""   # fallback 5
+    gemini_model: str = "gemini-2.5-flash"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
 
     # OpenAI — used for VOTD TTS (tts-1-hd, onyx voice)
@@ -72,6 +76,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()
