@@ -3,6 +3,9 @@
 echo "[start] Seeding database..."
 python -m scripts.seed_database --languages am or ti en niv || echo "[start] Seeder failed or already seeded — continuing"
 
+echo "[start] Syncing Amharic verses (replaces if JSON count differs from DB)..."
+python -m scripts.replace_amharic_verses || echo "[start] Amharic sync failed — continuing"
+
 echo "[start] Seeding Genesis quiz questions..."
 python -m scripts.parse_genesis_questions data/genesis_questions.pdf || echo "[start] Genesis quiz seed failed or already seeded — continuing"
 

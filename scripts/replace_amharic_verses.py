@@ -1,10 +1,12 @@
 """
-Delete all existing Amharic verses from the database and re-seed from data/amharic.json.
+Sync Amharic verses in the database with data/amharic.json.
 
-Run this AFTER deploying the new amharic.json to Railway:
+Idempotent: counts verses in the JSON file and the DB; if they already match, exits immediately.
+Replaces only the Amharic language — all other languages are untouched.
+
+Called automatically by start.sh on every deployment so the DB stays in sync with the committed JSON.
+Can also be run manually:
     railway run python -m scripts.replace_amharic_verses
-
-Safe to run multiple times — always starts fresh for Amharic only, leaves other languages untouched.
 """
 import json
 import sys
@@ -22,10 +24,20 @@ from app.models import Language, Book, Verse
 DATA_FILE = Path(__file__).parent.parent / "data" / "amharic.json"
 
 
+def _count_json_verses(bible_data: dict) -> int:
+    return sum(
+        len(ch) for b in bible_data["books"] for ch in b["chapters"]
+    )
+
+
 async def replace_amharic():
     if not DATA_FILE.exists():
         print(f"[replace] ERROR: {DATA_FILE} not found — run scraper first")
         sys.exit(1)
+
+    bible_data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    json_count = _count_json_verses(bible_data)
+    print(f"[replace] JSON has {json_count} Amharic verses")
 
     db_url = settings.get_database_url()
     print(f"[replace] Connecting to: {db_url[:40]}...")
@@ -42,15 +54,27 @@ async def replace_amharic():
         )
         lang = lang_result.scalar_one_or_none()
         if not lang:
-            print("[replace] ERROR: Language 'am' not found in DB — run seed_database first")
+            print("[replace] Language 'am' not in DB yet — seed_database will handle it")
             await engine.dispose()
-            sys.exit(1)
+            return
 
-        # Count existing
-        old_count = (await db.execute(
+        # Idempotency check: skip if DB already matches JSON
+        db_count = (await db.execute(
             text(f"SELECT COUNT(*) FROM verses WHERE language_id = {lang.id}")
         )).scalar()
-        print(f"[replace] Deleting {old_count} existing Amharic verses (lang_id={lang.id})...")
+
+        if db_count == json_count:
+            print(f"[replace] DB already has {db_count} verses — already up to date, skipping")
+            await engine.dispose()
+            return
+
+        print(f"[replace] DB has {db_count} verses, JSON has {json_count} — replacing...")
+
+        await db.execute(
+            text(f"DELETE FROM verses WHERE language_id = {lang.id}")
+        )
+        await db.commit()
+        print("[replace] Old verses deleted.")
 
         await db.execute(
             text(f"DELETE FROM verses WHERE language_id = {lang.id}")
@@ -61,10 +85,6 @@ async def replace_amharic():
         # Build book number → id map
         books_result = await db.execute(select(Book))
         book_map = {b.number: b.id for b in books_result.scalars().all()}
-
-        # Load new data
-        print(f"[replace] Loading {DATA_FILE}...")
-        bible_data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
 
         batch = []
         total = 0
