@@ -19,3 +19,10 @@ data/*.sqlite-wal
 data/mezmur/raw/
 data/mezmur/checkpoints/
 data/mezmur/httpcache/
+
+# Mezmur catalogue: the expanded JSON is ~52 MB, so only the gzip is tracked
+# (scripts/seed_mezmur.py expands it). Scratch/intermediate dumps stay local.
+data/mezmur_data.json
+data/mezmur_data.next.json
+data/mezmur_data.test.json
+scripts/mezmuroch_html.html

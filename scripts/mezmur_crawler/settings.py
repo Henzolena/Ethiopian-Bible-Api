@@ -1,0 +1,38 @@
+from pathlib import Path
+
+
+BOT_NAME = "bro_presenter_mezmur"
+
+SPIDER_MODULES = ["scripts.mezmur_crawler.spiders"]
+NEWSPIDER_MODULE = "scripts.mezmur_crawler.spiders"
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "data" / "mezmur"
+RAW_DIR = DATA_DIR / "raw"
+CHECKPOINT_DIR = DATA_DIR / "checkpoints"
+HTTP_CACHE_DIR = DATA_DIR / "httpcache"
+
+ROBOTSTXT_OBEY = True
+USER_AGENT = "BroPresenterPrivateCrawler/1.0 (+private macOS app data import)"
+
+CONCURRENT_REQUESTS = 8
+CONCURRENT_REQUESTS_PER_DOMAIN = 2
+DOWNLOAD_DELAY = 1.0
+RANDOMIZE_DOWNLOAD_DELAY = True
+
+AUTOTHROTTLE_ENABLED = True
+AUTOTHROTTLE_START_DELAY = 1.0
+AUTOTHROTTLE_MAX_DELAY = 20.0
+AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
+
+DOWNLOAD_TIMEOUT = 30
+RETRY_TIMES = 3
+REDIRECT_ENABLED = True
+
+HTTPCACHE_ENABLED = True
+HTTPCACHE_DIR = str(HTTP_CACHE_DIR)
+HTTPCACHE_EXPIRATION_SECS = 60 * 60 * 24
+
+FEED_EXPORT_ENCODING = "utf-8"
+LOG_LEVEL = "INFO"
+
