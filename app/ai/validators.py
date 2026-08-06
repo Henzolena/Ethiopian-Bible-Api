@@ -142,6 +142,13 @@ def grounding_overlap(candidate: str, passage: str) -> float:
 def check_grounding(candidate: str, passage: str, threshold: float = 0.25) -> Verdict:
     """Reject content that shares almost no vocabulary with the passage.
 
+    ONLY valid for content that should reuse the passage's own wording — a quiz
+    answer, an explanation, a fill-in-the-blank. Do NOT apply it to prose that
+    paraphrases: a study-guide summary or a spoken devotional deliberately uses
+    different words, so good output scores 5-11% and gets thrown away. That
+    mistake was made twice during development. Faithfulness of prose is the
+    reviewer's job (REVIEW_RUBRIC criterion 1).
+
     The threshold is deliberately lower than the iOS verse-text check (0.40).
     There it compared two renderings of the same verse; here a question legitimately
     introduces its own words, so demanding high overlap would reject good items.

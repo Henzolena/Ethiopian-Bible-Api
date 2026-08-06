@@ -476,11 +476,12 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
         if any(marker in script for marker in ("**", "##", "* ", "- ")):
             verdict.fail("markdown survived stripping and would be read aloud")
 
-        return ai.merge(
-            verdict,
-            ai.check_grounding(script, text, threshold=0.12),
-            ai.screen_safety(script),
-        )
+        # No vocabulary-overlap grounding here either: a 180-word devotional
+        # paraphrasing a single verse necessarily shares little wording with it, so
+        # the check would reject good scripts. The reviewer judges faithfulness to
+        # the verse (REVIEW_RUBRIC criterion 1); overlap is reserved for content
+        # that should quote the passage, like a quiz answer.
+        return ai.merge(verdict, ai.screen_safety(script))
 
     accepted, stats = await ai.run(
         kind="daily_devotional",

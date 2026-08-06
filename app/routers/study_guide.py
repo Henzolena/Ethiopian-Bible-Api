@@ -396,17 +396,20 @@ async def generate_study_guide(
                 qv.reasons = [f"quiz q{i + 1}: {r}" for r in qv.reasons]
             verdicts.append(qv)
 
-        # Grounding on the parts that assert what the passage says.
         read = candidate.get("read") or {}
-        verdicts.append(
-            ai.check_grounding(
-                " ".join(
-                    str(x) for x in (read.get("summary"), read.get("context")) if x
-                ),
-                passage,
-                threshold=0.20,
-            )
-        )
+
+        # Deliberately NO vocabulary-overlap grounding check on the guide's prose.
+        #
+        # A summary's job is to paraphrase, so a good one uses words the passage
+        # does not contain. Measured against Psalm 23, legitimate summaries scored
+        # 5-11% overlap and every candidate was rejected. Overlap is only a valid
+        # signal where the content should reuse the passage's own wording — a quiz
+        # answer or a fill-in-the-blank — not where it restates meaning.
+        #
+        # Grounding for prose is enforced by the model reviewer instead
+        # (REVIEW_RUBRIC criterion 1), which can actually read the passage and
+        # judge faithfulness. The reviewer is mandatory: an unreachable reviewer
+        # rejects rather than passes.
 
         # Safety across every free-text field a reader will actually see.
         reflect = candidate.get("reflect") or {}
