@@ -167,3 +167,38 @@ class TestMerge:
             "Who was told to build the ark?", OPTIONS, "B", "Genesis names Noah."
         )
         assert merge(good, screen_safety("gentle text")).ok
+
+
+class TestPackageSurface:
+    """Guard against the export gap that caused a production 500.
+
+    `check_mcq_grounding` was added to validators.py after __init__.py was
+    written, so it was never re-exported. Importing app.ai still succeeded and so
+    did importing app.main — the AttributeError only appeared when a request
+    actually reached the line. Asserting the surface exists is the cheap way to
+    stop that recurring.
+    """
+
+    def test_every_name_the_routers_use_is_exported(self):
+        import app.ai as ai
+
+        # Exactly the attributes referenced as ai.<name> in app/routers/.
+        for name in (
+            "CONTRACT_VERSION",
+            "Verdict",
+            "check_grounding",
+            "check_mcq",
+            "check_mcq_grounding",
+            "merge",
+            "normalise_answer_letter",
+            "run",
+            "screen_safety",
+            "system_prompt",
+        ):
+            assert hasattr(ai, name), f"app.ai is missing {name}"
+
+    def test_declared_exports_all_resolve(self):
+        import app.ai as ai
+
+        for name in ai.__all__:
+            assert hasattr(ai, name), f"__all__ lists {name} but it is not importable"
