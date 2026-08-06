@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app import ai
 from app.database import get_db
 from app.models import Book, Language, QuizQuestion, Verse
 from app.schemas import (
@@ -155,7 +156,7 @@ async def _resolve_lang(lang: str, db: AsyncSession) -> str:
 # OpenAI-compatible chat completions API with JSON-object response mode.
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
+_TASK_RULES = """\
 You are a Bible quiz question writer. Given Bible verse text you will generate
 multiple-choice trivia questions suitable for a Bible study app.
 
@@ -187,6 +188,9 @@ OUTPUT FORMAT (JSON object with a "questions" array):
   ]
 }
 """
+
+# The shared contract wins over these task rules — see app/ai/contract.py.
+_SYSTEM_PROMPT = ai.system_prompt(_TASK_RULES)
 
 # Mistral HTTP status → structured error
 _MISTRAL_ERRORS = {
@@ -476,13 +480,75 @@ async def generate_questions(
         language=lang,
     )
 
-    raw_questions = await _call_mistral(prompt)
+    # Everything below runs through app.ai.pipeline so this endpoint is held to
+    # the same contract as the study guide and devotional generators.
+    #
+    # Previously the model's output was written to the database as-is, with
+    # is_verified=False that nothing ever checked. Two concrete bugs came with
+    # that: `str(rq.get("correct_answer", "A")).strip().upper()[0]` raised
+    # IndexError on an empty string (HTTP 500), and turned "Option B" into "O" —
+    # a question no user could ever answer correctly.
+    passage_ref = _verse_ref(b.abbreviation, req.chapter, req.verse_start, req.verse_end)
+    passage_text = "\n".join(v["text"] for v in verses_text)
 
-    # Build model objects
+    async def _generate(n: int) -> list[dict]:
+        return await _call_mistral(
+            _build_prompt(
+                book_name=b.english_name,
+                chapter=req.chapter,
+                verse_start=req.verse_start,
+                verse_end=req.verse_end or req.verse_start,
+                verses_text=verses_text,
+                count=n,
+                difficulty=req.difficulty or "mixed",
+                language=lang,
+            )
+        )
+
+    def _validate(rq: dict) -> ai.Verdict:
+        options = [str(rq.get(f"option_{k}") or "").strip() for k in ("a", "b", "c", "d")]
+        letter = ai.normalise_answer_letter(rq.get("correct_answer"), options)
+        # Stash the normalised letter so the model-building step below does not
+        # have to re-derive it.
+        rq["_letter"] = letter
+
+        question = str(rq.get("question") or "").strip()
+        explanation = rq.get("explanation")
+        correct = options[("A", "B", "C", "D").index(letter)] if letter in ("A", "B", "C", "D") else ""
+
+        return ai.merge(
+            ai.check_mcq(question, options, letter, explanation),
+            ai.check_mcq_grounding(
+                correct_option=correct,
+                explanation=explanation,
+                passage=passage_text,
+                question=question,
+            ),
+            ai.screen_safety(question, explanation, *options),
+        )
+
+    accepted, stats = await ai.run(
+        kind="quiz_question",
+        passage_ref=passage_ref,
+        passage_text=passage_text,
+        want=req.count,
+        generate=_generate,
+        validate=_validate,
+    )
+
+    if not accepted:
+        raise _quiz_error(
+            502, "AI_QUALITY_GATE",
+            "No generated question met the quality bar for this passage.",
+            "This is usually a very short or unusual passage. Try a wider verse "
+            f"range. Rejections: {'; '.join(stats.reasons[:3]) or 'none recorded'}",
+        )
+
     new_questions: list[QuizQuestion] = []
-    for rq in raw_questions[: req.count]:
+    for rq in accepted:
         vs = rq.get("verse_start") or req.verse_start
         ve = rq.get("verse_end") or req.verse_end or vs
+        review = rq.get("_review") or {}
         new_questions.append(
             QuizQuestion(
                 book_id=b.id,
@@ -495,12 +561,14 @@ async def generate_questions(
                 option_b=str(rq.get("option_b", "")).strip(),
                 option_c=str(rq.get("option_c", "")).strip(),
                 option_d=str(rq.get("option_d", "")).strip(),
-                correct_answer=str(rq.get("correct_answer", "A")).strip().upper()[0],
+                correct_answer=rq["_letter"],
                 explanation=rq.get("explanation"),
                 difficulty=rq.get("difficulty", "beginner"),
                 source="ai_generated",
-                author="Mistral AI",
-                is_verified=False,
+                author=f"Mistral AI (contract {ai.CONTRACT_VERSION})",
+                # Now means what it says: structurally valid, grounded in the
+                # passage, safety-screened, and passed model review.
+                is_verified=True,
             )
         )
 
@@ -652,19 +720,38 @@ async def _save_questions(
     db: AsyncSession,
     group_ids: list[str] | None = None,  # when provided, links each question to its group
 ) -> int:
-    """Inserts questions into the DB. Returns count saved."""
+    """Inserts questions into the DB. Returns count saved.
+
+    Structural validation applies here too. Grounding and model review do not:
+    these rows are usually translations of an already-reviewed English question,
+    and scoring Amharic text against an English passage would reject everything.
+    What still matters is that the answer letter resolves to a real option — the
+    original code did `str(...).strip().upper()[0]`, which crashed on an empty
+    string and silently turned "Option B" into "O", producing questions no user
+    could answer correctly.
+    """
     import uuid as _uuid
     rows = []
+    skipped: list[str] = []
     for i, rq in enumerate(raw_questions):
         vs = rq.get("verse_start")
         ve = rq.get("verse_end") or vs
-        q  = rq.get("question", "").strip()
-        oa = rq.get("option_a", "").strip()
-        ob = rq.get("option_b", "").strip()
-        oc = rq.get("option_c", "").strip()
-        od = rq.get("option_d", "").strip()
-        if not (q and oa and ob and oc and od):
+        q  = (rq.get("question") or "").strip()
+        oa = (rq.get("option_a") or "").strip()
+        ob = (rq.get("option_b") or "").strip()
+        oc = (rq.get("option_c") or "").strip()
+        od = (rq.get("option_d") or "").strip()
+
+        options = [oa, ob, oc, od]
+        letter = ai.normalise_answer_letter(rq.get("correct_answer"), options)
+        verdict = ai.merge(
+            ai.check_mcq(q, options, letter, rq.get("explanation")),
+            ai.screen_safety(q, rq.get("explanation"), *options),
+        )
+        if not verdict.ok:
+            skipped.append(f"{lang} #{i + 1}: {verdict.summary}")
             continue
+
         gid = (group_ids[i] if group_ids and i < len(group_ids)
                else str(_uuid.uuid4()))
         rows.append(QuizQuestion(
@@ -674,13 +761,18 @@ async def _save_questions(
             chapter=chapter,
             verse_start=vs, verse_end=ve,
             question=q, option_a=oa, option_b=ob, option_c=oc, option_d=od,
-            correct_answer=str(rq.get("correct_answer", "A")).strip().upper()[0],
+            correct_answer=letter,
             explanation=rq.get("explanation"),
             difficulty=rq.get("difficulty", "beginner"),
             source="ai_generated",
             author=author,
+            # Structurally validated and safety-screened, but not grounded or
+            # model-reviewed against a translated passage — hence not "verified".
             is_verified=False,
         ))
+
+    if skipped:
+        print(f"[QuizML] Skipped {len(skipped)} invalid question(s): {'; '.join(skipped[:5])}")
     if rows:
         db.add_all(rows)
         await db.flush()
