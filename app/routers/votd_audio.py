@@ -39,6 +39,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
 from app.config import settings
+from app import ai
 
 router = APIRouter(prefix="/votd", tags=["Verse of the Day"])
 
@@ -408,8 +409,15 @@ def _strip_markdown(text: str) -> str:
 
 
 async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
-    """Calls Mistral to write a 180-200 word spoken NIV devotional, then strips any markdown."""
-    prompt = (
+    """Writes a 180-200 word spoken NIV devotional, gated by the AI content pipeline.
+
+    This is the highest-stakes surface in the app: it is spoken aloud, unprompted,
+    to someone who has just woken up. Previously the only post-processing was
+    markdown stripping — nothing checked whether the devotional stayed inside the
+    passage, avoided framing hardship as punishment, or steered clear of medical
+    advice. Now it goes through the same contract and gate as everything else.
+    """
+    task_rules = (
         "You are a warm, Spirit-filled pastor delivering a spoken morning devotional.\n"
         "You are speaking directly into someone's ear — this text will be converted to AUDIO.\n\n"
         f"Today's verse (NIV): {ref} — \"{text}\"\n\n"
@@ -426,23 +434,75 @@ async def _generate_script(ref: str, text: str, http: httpx.AsyncClient) -> str:
         "- Separate paragraphs with a single blank line."
     )
 
-    resp = await http.post(
-        f"{settings.mistral_base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {settings.mistral_api_key}", "Content-Type": "application/json"},
-        json={
-            "model":       settings.mistral_model,
-            "messages":    [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens":  400,
-        },
-        timeout=30,
+    async def _generate(_n: int) -> list[dict]:
+        resp = await http.post(
+            f"{settings.mistral_base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.mistral_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.mistral_model,
+                "messages": [
+                    # The shared contract carries the pastoral and grounding rules;
+                    # task_rules only covers voice and TTS formatting.
+                    {"role": "system", "content": ai.system_prompt(task_rules)},
+                    {"role": "user", "content": f'Today\'s verse (NIV): {ref} — "{text}"'},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 400,
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Mistral script error {resp.status_code}: {resp.text[:200]}",
+            )
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        return [{"script": _strip_markdown(raw)}]
+
+    def _validate(candidate: dict) -> ai.Verdict:
+        script = candidate.get("script") or ""
+        verdict = ai.Verdict(ok=True)
+
+        words = len(script.split())
+        if words < 90:
+            verdict.fail(f"devotional too short for a spoken reading ({words} words)")
+        elif words > 320:
+            verdict.fail(f"devotional too long for the audio slot ({words} words)")
+
+        # Markdown here is not cosmetic: the TTS engine reads the characters aloud.
+        if any(marker in script for marker in ("**", "##", "* ", "- ")):
+            verdict.fail("markdown survived stripping and would be read aloud")
+
+        return ai.merge(
+            verdict,
+            ai.check_grounding(script, text, threshold=0.12),
+            ai.screen_safety(script),
+        )
+
+    accepted, stats = await ai.run(
+        kind="daily_devotional",
+        passage_ref=ref,
+        passage_text=text,
+        want=1,
+        generate=_generate,
+        validate=_validate,
     )
 
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Mistral script error {resp.status_code}: {resp.text[:200]}")
+    if not accepted:
+        # Deliberately fail rather than fall back to an unreviewed script: this is
+        # spoken aloud to someone at their most receptive.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Devotional did not pass the content gate. "
+                f"Rejections: {'; '.join(stats.reasons[:3]) or 'none recorded'}"
+            ),
+        )
 
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    return _strip_markdown(raw)
+    return accepted[0]["script"]
 
 
 # ── AI: Gemini TTS ────────────────────────────────────────────────────────────

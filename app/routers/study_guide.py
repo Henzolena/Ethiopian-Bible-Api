@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app import ai
 from app.database import get_db
 from app.models import Book, BookName, Verse
 from app.routers.books import _resolve_book, _resolve_language
@@ -172,7 +173,7 @@ def _language_instruction(language_code: str) -> str:
     return "Write the entire guide in clear English."
 
 
-_SYSTEM_PROMPT = """\
+_TASK_RULES = """\
 You prepare complete Bible study session guides for a mobile app.
 
 Rules:
@@ -222,6 +223,9 @@ Rules:
   }
 }
 """
+
+# The shared contract overrides these task rules — see app/ai/contract.py.
+_SYSTEM_PROMPT = ai.system_prompt(_TASK_RULES)
 
 
 def _build_prompt(
@@ -357,7 +361,88 @@ async def generate_study_guide(
         passage=_passage_text(verses),
     )
 
-    guide = StudyGuide.model_validate(await _call_mistral(prompt))
+    passage = _passage_text(verses)
+
+    # A guide is one composite item rather than a list, so it goes through the
+    # pipeline with want=1. Previously the only check was Pydantic shape
+    # validation, which cannot tell whether the devotional is grounded in the
+    # passage or whether the quiz inside it is answerable.
+    async def _generate(_n: int) -> list[dict[str, Any]]:
+        return [await _call_mistral(prompt)]
+
+    def _validate(candidate: dict[str, Any]) -> ai.Verdict:
+        verdicts: list[ai.Verdict] = []
+
+        # Shape first: everything below assumes the sections exist.
+        try:
+            StudyGuide.model_validate(candidate)
+        except Exception as exc:  # pydantic ValidationError
+            v = ai.Verdict(ok=True)
+            return v.fail(f"guide shape invalid: {type(exc).__name__}")
+
+        # The embedded quiz must be answerable — same bar as /quiz/generate.
+        for i, q in enumerate(candidate.get("quiz", {}).get("questions") or []):
+            options = [str(o or "").strip() for o in (q.get("options") or [])]
+            idx = q.get("answer_index")
+            letter = (
+                ("A", "B", "C", "D")[idx]
+                if isinstance(idx, int) and 0 <= idx < min(4, len(options))
+                else None
+            )
+            qv = ai.check_mcq(
+                str(q.get("question") or ""), options, letter, q.get("explanation")
+            )
+            if not qv.ok:
+                qv.reasons = [f"quiz q{i + 1}: {r}" for r in qv.reasons]
+            verdicts.append(qv)
+
+        # Grounding on the parts that assert what the passage says.
+        read = candidate.get("read") or {}
+        verdicts.append(
+            ai.check_grounding(
+                " ".join(
+                    str(x) for x in (read.get("summary"), read.get("context")) if x
+                ),
+                passage,
+                threshold=0.20,
+            )
+        )
+
+        # Safety across every free-text field a reader will actually see.
+        reflect = candidate.get("reflect") or {}
+        pray = candidate.get("pray") or {}
+        verdicts.append(
+            ai.screen_safety(
+                read.get("summary"),
+                read.get("context"),
+                reflect.get("devotional"),
+                reflect.get("application"),
+                pray.get("guided_prayer"),
+                *(reflect.get("personal_questions") or []),
+                *(pray.get("prayer_points") or []),
+            )
+        )
+
+        return ai.merge(*verdicts)
+
+    accepted, stats = await ai.run(
+        kind="study_guide",
+        passage_ref=verse_ref,
+        passage_text=passage,
+        want=1,
+        generate=_generate,
+        validate=_validate,
+    )
+
+    if not accepted:
+        raise _guide_error(
+            502, "AI_QUALITY_GATE",
+            "No study guide met the quality bar for this passage.",
+            "Try a wider verse range. Rejections: "
+            f"{'; '.join(stats.reasons[:3]) or 'none recorded'}",
+        )
+
+    guide = StudyGuide.model_validate(accepted[0])
 
     return StudyGuideResponse(
         book=book.abbreviation,
