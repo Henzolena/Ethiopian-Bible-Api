@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app import ai
 from app.database import get_db
-from app.models import Book, BookName, Verse
+from app.models import Book, BookName, Verse, StudyGuideCache
 from app.routers.books import _resolve_book, _resolve_language
 
 router = APIRouter(prefix="/study-guide", tags=["Study Guide"])
@@ -363,6 +363,35 @@ async def generate_study_guide(
 
     passage = _passage_text(verses)
 
+    # Serve a cached guide when we have one. Generation is slow enough that this
+    # is the difference between usable and not: 9.8s in English, 51.4s in Amharic
+    # measured on Psalm 23:1-6, against a 120s client timeout.
+    cache_q = select(StudyGuideCache).where(
+        StudyGuideCache.book_id == book.id,
+        StudyGuideCache.language_code == language.code,
+        StudyGuideCache.chapter == request.chapter,
+        StudyGuideCache.verse_start.is_(request.verse_start)
+        if request.verse_start is None
+        else StudyGuideCache.verse_start == request.verse_start,
+        StudyGuideCache.verse_end.is_(request.verse_end)
+        if request.verse_end is None
+        else StudyGuideCache.verse_end == request.verse_end,
+        StudyGuideCache.contract_version == ai.CONTRACT_VERSION,
+    )
+    cached = (await db.execute(cache_q)).scalars().first()
+    if cached:
+        return StudyGuideResponse(
+            book=book.abbreviation,
+            book_name=book_name,
+            chapter=request.chapter,
+            verse_start=request.verse_start,
+            verse_end=request.verse_end,
+            verse_ref=verse_ref,
+            language=language.code,
+            generated_at=cached.created_at.isoformat() if cached.created_at else "",
+            guide=StudyGuide.model_validate(json.loads(cached.guide_json)),
+        )
+
     # A guide is one composite item rather than a list, so it goes through the
     # pipeline with want=1. Previously the only check was Pydantic shape
     # validation, which cannot tell whether the devotional is grounded in the
@@ -435,6 +464,12 @@ async def generate_study_guide(
         want=1,
         generate=_generate,
         validate=_validate,
+        # One round only. A guide costs up to 51s to generate (Amharic) and
+        # _call_mistral already retries twice internally for JSON shape, so a
+        # second pipeline round would blow past the client's 120s timeout and
+        # surface as a network error after a long wait. Better to fail fast with
+        # the reason than to make the user stare at a spinner.
+        max_rounds=1,
     )
 
     if not accepted:
@@ -445,7 +480,27 @@ async def generate_study_guide(
             f"{'; '.join(stats.reasons[:3]) or 'none recorded'}",
         )
 
-    guide = StudyGuide.model_validate(accepted[0])
+    payload = {k: v for k, v in accepted[0].items() if not k.startswith("_")}
+    guide = StudyGuide.model_validate(payload)
+
+    # Store for next time. A failure here must not cost the caller their guide —
+    # they waited up to a minute for it.
+    try:
+        db.add(
+            StudyGuideCache(
+                book_id=book.id,
+                language_code=language.code,
+                chapter=request.chapter,
+                verse_start=request.verse_start,
+                verse_end=request.verse_end,
+                guide_json=json.dumps(payload, ensure_ascii=False),
+                contract_version=ai.CONTRACT_VERSION,
+            )
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 - caching is best-effort
+        await db.rollback()
+        print(f"[study_guide] cache write failed for {verse_ref} ({language.code}): {exc}")
 
     return StudyGuideResponse(
         book=book.abbreviation,

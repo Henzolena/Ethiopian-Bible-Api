@@ -240,3 +240,50 @@ class EthiopicFont(Base):
         Index("ix_ethiopic_font_active", "is_active"),
         Index("ix_ethiopic_font_weight", "weight"),
     )
+
+
+class StudyGuideCache(Base):
+    """A generated study guide, keyed by passage + language + contract version.
+
+    Guides are expensive and were regenerated on every request. Measured on
+    Psalm 23:1-6: 9.8s in English but 51.4s in Amharic — Ethiopic script costs far
+    more tokens per word, and a guide is generated with max_tokens=8192. At 51s a
+    single successful attempt already consumed half the iOS client's 120s budget,
+    so any retry surfaced to the user as "network issue" after a long wait.
+
+    Caching makes a repeat request for the same passage effectively free, which is
+    the common case: a study leader opening the same passage in several languages,
+    or a group revisiting it.
+
+    contract_version is part of the key on purpose — changing the content contract
+    in app/ai must not keep serving guides produced under the old rules.
+    """
+    __tablename__ = "study_guide_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    book_id          = Column(Integer, ForeignKey("books.id"), nullable=False)
+    language_code    = Column(String(10), nullable=False)
+    chapter          = Column(Integer, nullable=False)
+    verse_start      = Column(Integer, nullable=True)
+    verse_end        = Column(Integer, nullable=True)
+
+    # The full guide payload, exactly as returned to the client.
+    guide_json       = Column(Text, nullable=False)
+    contract_version = Column(String(20), nullable=False)
+
+    created_at       = Column(DateTime(timezone=True), server_default=func.now())
+
+    book = relationship("Book")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "book_id", "language_code", "chapter", "verse_start", "verse_end",
+            "contract_version",
+            name="uq_study_guide_cache_passage",
+        ),
+        Index(
+            "ix_study_guide_cache_lookup",
+            "book_id", "language_code", "chapter", "verse_start", "verse_end",
+        ),
+    )
