@@ -395,6 +395,11 @@ async def _store(
     """Best-effort cache write. Never let a cache failure cost the caller a guide
     they may have waited a minute for."""
     try:
+        # Check first: a duplicate insert raises IntegrityError, and rolling that
+        # back leaves the session in a state where any later IO raises
+        # MissingGreenlet. Cheaper and safer to not attempt it.
+        if await _lookup(db, book, language_code, request) is not None:
+            return
         db.add(
             StudyGuideCache(
                 book_id=book.id,
@@ -666,7 +671,11 @@ async def generate_study_guide(
         )
 
     english_payload = {k: v for k, v in accepted[0].items() if not k.startswith("_")}
-    await _store(db, book, english_language.code, request, english_payload, verse_ref)
+    # Only write when it was generated here. Re-storing a guide that came from the
+    # cache violates the unique constraint, and the resulting rollback leaves the
+    # async session unusable — which surfaced as a 500 rather than a warning.
+    if english_cached is None:
+        await _store(db, book, english_language.code, request, english_payload, verse_ref)
 
     if is_english:
         payload = english_payload
