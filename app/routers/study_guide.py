@@ -249,6 +249,168 @@ Make the guide usable inside the app as-is. Keep each section concise enough for
 """
 
 
+# ---------------------------------------------------------------------------
+# Translation
+#
+# Guides are always generated and gated in English, then translated. Measured on
+# Psalm 23:1-6, native non-English generation was both slower and materially
+# worse: Amharic took 51s, and Oromo and Tigrigna failed the gate outright —
+# Oromo for inventing phrases absent from the passage, Tigrigna for emitting
+# duplicate quiz options in all three questions. Translation is a much easier task
+# than generation, so every language inherits a guide that has already passed
+# grounding, answerability and safety review.
+# ---------------------------------------------------------------------------
+
+_LANGUAGE_NAMES = {
+    "am": "Amharic",
+    "or": "Afaan Oromo",
+    "ti": "Tigrigna",
+}
+
+_ENGLISH_CODES = ("niv", "en")
+
+_TRANSLATE_RULES = """\
+You translate an already-approved Bible study guide into another language.
+
+You are translating, not rewriting. The English guide has already been reviewed
+for accuracy and pastoral care — your job is to carry it across faithfully.
+
+RULES:
+- Translate every human-readable string value. Do NOT translate JSON keys.
+- Preserve the exact JSON structure, key names, and array lengths.
+- answer_index is a number. Do NOT change it, and do NOT reorder the options
+  array — reordering would make the recorded answer wrong.
+- Keep quiz options distinct from each other after translation. If two would
+  collide, rephrase one rather than duplicating.
+- Use the natural, canonical church vocabulary of the target language for
+  biblical terms.
+- Do not add, remove, summarise or explain anything.
+- Return ONLY the translated JSON object."""
+
+
+async def _translate_guide(
+    guide: dict[str, Any],
+    target_lang: str,
+    native_passage: str,
+) -> dict[str, Any] | None:
+    """Translate an approved English guide. Returns None on failure."""
+    language_name = _LANGUAGE_NAMES.get(target_lang)
+    if not language_name or not settings.mistral_api_key:
+        return None
+
+    user_msg = (
+        f"Target language: {language_name}\n\n"
+        f"The passage in {language_name}, for canonical terminology:\n{native_passage}\n\n"
+        f"Guide to translate (JSON):\n{json.dumps(guide, ensure_ascii=False)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(
+                f"{settings.mistral_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.mistral_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.mistral_model,
+                    "messages": [
+                        {"role": "system", "content": _TRANSLATE_RULES},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    # Low temperature: this is a faithfulness task, not a creative one.
+                    "temperature": 0.2,
+                    "max_tokens": 8192,
+                },
+            )
+        if resp.status_code != 200:
+            print(f"[study_guide] translation to {target_lang} failed: HTTP {resp.status_code}")
+            return None
+        return json.loads(resp.json()["choices"][0]["message"]["content"])
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        print(f"[study_guide] translation to {target_lang} failed: {type(exc).__name__}")
+        return None
+
+
+def _check_translated_guide(candidate: dict[str, Any]) -> ai.Verdict:
+    """Structural check on a translated guide.
+
+    Deliberately no grounding or model review: the English original already
+    passed both, and scoring Amharic text against an English passage would reject
+    everything — the same mistake made twice earlier in this work. What matters
+    here is that translation did not break the quiz: an answer_index still in
+    range, and options still distinct after being rendered in another script.
+    """
+    verdict = ai.Verdict(ok=True)
+    try:
+        StudyGuide.model_validate(candidate)
+    except Exception as exc:  # pydantic ValidationError
+        return verdict.fail(f"translated guide shape invalid: {type(exc).__name__}")
+
+    for i, q in enumerate(candidate.get("quiz", {}).get("questions") or []):
+        options = [str(o or "").strip() for o in (q.get("options") or [])]
+        idx = q.get("answer_index")
+        letter = (
+            ("A", "B", "C", "D")[idx]
+            if isinstance(idx, int) and 0 <= idx < min(4, len(options))
+            else None
+        )
+        qv = ai.check_mcq(str(q.get("question") or ""), options, letter, q.get("explanation"))
+        if not qv.ok:
+            qv.reasons = [f"translated quiz q{i + 1}: {r}" for r in qv.reasons]
+            verdict = ai.merge(verdict, qv)
+    return verdict
+
+async def _lookup(
+    db: AsyncSession,
+    book: Book,
+    language_code: str,
+    request: "StudyGuideRequest",
+) -> StudyGuideCache | None:
+    """Cached guide for this exact passage, language and contract version."""
+    q = select(StudyGuideCache).where(
+        StudyGuideCache.book_id == book.id,
+        StudyGuideCache.language_code == language_code,
+        StudyGuideCache.chapter == request.chapter,
+        StudyGuideCache.verse_start.is_(None)
+        if request.verse_start is None
+        else StudyGuideCache.verse_start == request.verse_start,
+        StudyGuideCache.verse_end.is_(None)
+        if request.verse_end is None
+        else StudyGuideCache.verse_end == request.verse_end,
+        StudyGuideCache.contract_version == ai.CONTRACT_VERSION,
+    )
+    return (await db.execute(q)).scalars().first()
+
+
+async def _store(
+    db: AsyncSession,
+    book: Book,
+    language_code: str,
+    request: "StudyGuideRequest",
+    payload: dict[str, Any],
+    verse_ref: str,
+) -> None:
+    """Best-effort cache write. Never let a cache failure cost the caller a guide
+    they may have waited a minute for."""
+    try:
+        db.add(
+            StudyGuideCache(
+                book_id=book.id,
+                language_code=language_code,
+                chapter=request.chapter,
+                verse_start=request.verse_start,
+                verse_end=request.verse_end,
+                guide_json=json.dumps(payload, ensure_ascii=False),
+                contract_version=ai.CONTRACT_VERSION,
+            )
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 - caching is best-effort
+        await db.rollback()
+        print(f"[study_guide] cache write failed for {verse_ref} ({language_code}): {exc}")
+
 async def _call_mistral(prompt: str) -> dict[str, Any]:
     if not settings.mistral_api_key:
         raise _guide_error(
@@ -354,31 +516,48 @@ async def generate_study_guide(
     )
     book_name = await _book_name(book.id, language.id, book.english_name, db)
     verse_ref = _verse_ref(book, request.chapter, request.verse_start, request.verse_end)
-    prompt = _build_prompt(
-        language_code=language.code,
-        book_name=book_name,
-        verse_ref=verse_ref,
-        passage=_passage_text(verses),
-    )
+    native_passage = _passage_text(verses)
 
-    passage = _passage_text(verses)
+    # Always generate in English, then translate. See the Translation section
+    # above for the measurements behind this.
+    is_english = language.code in _ENGLISH_CODES
+    if is_english:
+        english_language, english_verses = language, verses
+    else:
+        english_language = None
+        for code in _ENGLISH_CODES:
+            try:
+                english_language = await _resolve_language(code, db)
+                break
+            except HTTPException:
+                continue
+        if english_language is None:
+            raise _guide_error(
+                503, "NO_ENGLISH_SOURCE",
+                "Guides are generated in English before translation, but no English "
+                "translation is seeded on this server.",
+            )
+        english_verses = await _fetch_passage(
+            book=book,
+            language_id=english_language.id,
+            chapter=request.chapter,
+            verse_start=request.verse_start,
+            verse_end=request.verse_end,
+            db=db,
+        )
+
+    passage = _passage_text(english_verses)
+    prompt = _build_prompt(
+        language_code=english_language.code,
+        book_name=await _book_name(book.id, english_language.id, book.english_name, db),
+        verse_ref=verse_ref,
+        passage=passage,
+    )
 
     # Serve a cached guide when we have one. Generation is slow enough that this
     # is the difference between usable and not: 9.8s in English, 51.4s in Amharic
     # measured on Psalm 23:1-6, against a 120s client timeout.
-    cache_q = select(StudyGuideCache).where(
-        StudyGuideCache.book_id == book.id,
-        StudyGuideCache.language_code == language.code,
-        StudyGuideCache.chapter == request.chapter,
-        StudyGuideCache.verse_start.is_(request.verse_start)
-        if request.verse_start is None
-        else StudyGuideCache.verse_start == request.verse_start,
-        StudyGuideCache.verse_end.is_(request.verse_end)
-        if request.verse_end is None
-        else StudyGuideCache.verse_end == request.verse_end,
-        StudyGuideCache.contract_version == ai.CONTRACT_VERSION,
-    )
-    cached = (await db.execute(cache_q)).scalars().first()
+    cached = await _lookup(db, book, language.code, request)
     if cached:
         return StudyGuideResponse(
             book=book.abbreviation,
@@ -457,50 +636,61 @@ async def generate_study_guide(
 
         return ai.merge(*verdicts)
 
-    accepted, stats = await ai.run(
-        kind="study_guide",
-        passage_ref=verse_ref,
-        passage_text=passage,
-        want=1,
-        generate=_generate,
-        validate=_validate,
-        # One round only. A guide costs up to 51s to generate (Amharic) and
-        # _call_mistral already retries twice internally for JSON shape, so a
-        # second pipeline round would blow past the client's 120s timeout and
-        # surface as a network error after a long wait. Better to fail fast with
-        # the reason than to make the user stare at a spinner.
-        max_rounds=1,
-    )
+    # If English is already cached, translate from that instead of paying for
+    # generation again — otherwise every additional language regenerates it.
+    english_cached = None if is_english else await _lookup(db, book, english_language.code, request)
+    if english_cached is not None:
+        accepted = [json.loads(english_cached.guide_json)]
+        stats = None
+    else:
+        accepted, stats = await ai.run(
+            kind="study_guide",
+            passage_ref=verse_ref,
+            passage_text=passage,
+            want=1,
+            generate=_generate,
+            validate=_validate,
+            # One round only. Generation is slow enough that a second round
+            # would blow past the client's 120s timeout and surface as a network
+            # error after a long wait, and _call_mistral already retries twice
+            # internally for JSON shape. Fail fast with the reason instead.
+            max_rounds=1,
+        )
 
     if not accepted:
+        reasons = "; ".join(stats.reasons[:3]) if stats else "none recorded"
         raise _guide_error(
             502, "AI_QUALITY_GATE",
             "No study guide met the quality bar for this passage.",
-            "Try a wider verse range. Rejections: "
-            f"{'; '.join(stats.reasons[:3]) or 'none recorded'}",
+            f"Try a wider verse range. Rejections: {reasons}",
         )
 
-    payload = {k: v for k, v in accepted[0].items() if not k.startswith("_")}
-    guide = StudyGuide.model_validate(payload)
+    english_payload = {k: v for k, v in accepted[0].items() if not k.startswith("_")}
+    await _store(db, book, english_language.code, request, english_payload, verse_ref)
 
-    # Store for next time. A failure here must not cost the caller their guide —
-    # they waited up to a minute for it.
-    try:
-        db.add(
-            StudyGuideCache(
-                book_id=book.id,
-                language_code=language.code,
-                chapter=request.chapter,
-                verse_start=request.verse_start,
-                verse_end=request.verse_end,
-                guide_json=json.dumps(payload, ensure_ascii=False),
-                contract_version=ai.CONTRACT_VERSION,
+    if is_english:
+        payload = english_payload
+    else:
+        # Translate the approved guide. A translation failure is worth surfacing
+        # rather than silently handing back English text to an Amharic reader.
+        translated = await _translate_guide(english_payload, language.code, native_passage)
+        if translated is None:
+            raise _guide_error(
+                502, "TRANSLATION_FAILED",
+                f"The guide was generated but could not be translated into {language.code}.",
+                "Retry in a moment; the English guide is cached so this is fast.",
             )
-        )
-        await db.commit()
-    except Exception as exc:  # noqa: BLE001 - caching is best-effort
-        await db.rollback()
-        print(f"[study_guide] cache write failed for {verse_ref} ({language.code}): {exc}")
+        verdict = _check_translated_guide(translated)
+        if not verdict.ok:
+            raise _guide_error(
+                502, "TRANSLATION_INVALID",
+                f"Translation into {language.code} did not survive validation.",
+                verdict.summary,
+            )
+        payload = translated
+        await _store(db, book, language.code, request, payload, verse_ref)
+
+    guide = StudyGuide.model_validate(payload)
 
     return StudyGuideResponse(
         book=book.abbreviation,
