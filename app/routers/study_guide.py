@@ -5,6 +5,7 @@ This router turns a selected Bible passage into a full session guide so users
 can read, reflect, discuss, quiz, pray, and recap without leaving the app.
 """
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -98,6 +99,15 @@ class StudyGuideResponse(BaseModel):
     language: str
     generated_at: str
     guide: StudyGuide
+
+    # "native"      — the guide is in the requested language
+    # "coming_soon" — translation is not usable yet, so the English guide is
+    #                 returned and the client should surface `translation_note`
+    translation_status: str = "native"
+    translation_note: str | None = None
+    # The language the returned guide is actually written in. When
+    # translation_status is "coming_soon" this differs from `language`.
+    guide_language: str | None = None
 
 
 def _guide_error(status: int, code: str, message: str, hint: str | None = None) -> HTTPException:
@@ -269,6 +279,10 @@ _LANGUAGE_NAMES = {
 
 _ENGLISH_CODES = ("niv", "en")
 
+# Total wall-clock allowed for translation attempts, so the endpoint always
+# returns inside the iOS client's 120s timeout even when the model stalls.
+_TRANSLATION_BUDGET = 75.0
+
 _TRANSLATE_RULES = """\
 You translate an already-approved Bible study guide into another language.
 
@@ -379,6 +393,20 @@ def _check_translated_guide(candidate: dict[str, Any]) -> ai.Verdict:
             qv.reasons = [f"translated quiz q{i + 1}: {r}" for r in qv.reasons]
             verdict = ai.merge(verdict, qv)
     return verdict
+
+_COMING_SOON_NOTE = {
+    "am": "Amharic study guides are still being tuned. Showing the English guide for now.",
+    "or": "Afaan Oromo study guides are coming soon. Showing the English guide for now.",
+    "ti": "Tigrigna study guides are coming soon. Showing the English guide for now.",
+}
+
+
+def _coming_soon_note(language_code: str) -> str:
+    return _COMING_SOON_NOTE.get(
+        language_code,
+        "Study guides in this language are coming soon. Showing the English guide for now.",
+    )
+
 
 async def _lookup(
     db: AsyncSession,
@@ -700,35 +728,56 @@ async def generate_study_guide(
     else:
         # Translate the approved guide. A translation failure is worth surfacing
         # rather than silently handing back English text to an Amharic reader.
-        translated = None
-        verdict = None
-        feedback = None
-        # Two attempts: the second is worth it because the English guide is already
-        # cached, so a retry costs only the translation call.
-        for _attempt in range(2):
-            translated = await _translate_guide(
-                english_payload, language.code, native_passage, feedback=feedback
-            )
-            if translated is None:
-                break
-            verdict = _check_translated_guide(translated)
-            if verdict.ok:
-                break
-            feedback = verdict.summary
-            print(f"[study_guide] retrying {language.code} translation: {feedback}")
+        # Bounded overall: a Tigrigna request was observed running 438s, far past
+        # any client timeout, holding a worker the whole time. Whatever happens
+        # inside, this returns.
+        async def _attempt_translation() -> dict[str, Any] | None:
+            translated: dict[str, Any] | None = None
+            feedback: str | None = None
+            for _attempt in range(2):
+                translated = await _translate_guide(
+                    english_payload, language.code, native_passage, feedback=feedback
+                )
+                if translated is None:
+                    return None
+                verdict = _check_translated_guide(translated)
+                if verdict.ok:
+                    return translated
+                feedback = verdict.summary
+                print(f"[study_guide] retrying {language.code} translation: {feedback}")
+            return None
+
+        try:
+            translated = await asyncio.wait_for(_attempt_translation(), timeout=_TRANSLATION_BUDGET)
+        except asyncio.TimeoutError:
+            translated = None
+            print(f"[study_guide] translation to {language.code} exceeded {_TRANSLATION_BUDGET}s")
 
         if translated is None:
-            raise _guide_error(
-                502, "TRANSLATION_FAILED",
-                f"The guide was generated but could not be translated into {language.code}.",
-                "Retry in a moment; the English guide is cached so this is fast.",
+            # Rather than failing the request, hand back the reviewed English
+            # guide and tell the client this language is not ready. A group gets a
+            # usable session instead of an error screen, and the gap is visible
+            # rather than silently serving content that failed validation.
+            #
+            # Deliberately NOT cached under the requested language code: caching
+            # English there would make the placeholder permanent and hide the
+            # problem once translation improves.
+            print(f"[study_guide] {language.code} marked coming_soon for {verse_ref}")
+            return StudyGuideResponse(
+                book=book.abbreviation,
+                book_name=book_name,
+                chapter=request.chapter,
+                verse_start=request.verse_start,
+                verse_end=request.verse_end,
+                verse_ref=verse_ref,
+                language=language.code,
+                generated_at=datetime.now(timezone.utc).isoformat(),
+                guide=StudyGuide.model_validate(english_payload),
+                translation_status="coming_soon",
+                translation_note=_coming_soon_note(language.code),
+                guide_language=english_language.code,
             )
-        if verdict is not None and not verdict.ok:
-            raise _guide_error(
-                502, "TRANSLATION_INVALID",
-                f"Translation into {language.code} did not survive validation.",
-                verdict.summary,
-            )
+
         payload = translated
         await _store(db, book, language.code, request, payload, verse_ref)
 
