@@ -292,16 +292,34 @@ async def _translate_guide(
     guide: dict[str, Any],
     target_lang: str,
     native_passage: str,
+    feedback: str | None = None,
 ) -> dict[str, Any] | None:
-    """Translate an approved English guide. Returns None on failure."""
+    """Translate an approved English guide. Returns None on failure.
+
+    `feedback` carries the previous attempt's validation failures back to the
+    model. Oromo and Tigrigna translations routinely collapse four distinct
+    English options into duplicates despite the instruction not to, so naming the
+    specific collision is far more effective than repeating the rule.
+    """
     language_name = _LANGUAGE_NAMES.get(target_lang)
     if not language_name or not settings.mistral_api_key:
         return None
+
+    correction = ""
+    if feedback:
+        correction = (
+            "\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED:\n"
+            f"{feedback}\n"
+            "Fix exactly that. Every option within a question must be a different "
+            "string in the target language. Keep answer_index unchanged and do not "
+            "reorder options — rephrase the colliding option instead."
+        )
 
     user_msg = (
         f"Target language: {language_name}\n\n"
         f"The passage in {language_name}, for canonical terminology:\n{native_passage}\n\n"
         f"Guide to translate (JSON):\n{json.dumps(guide, ensure_ascii=False)}"
+        f"{correction}"
     )
 
     try:
@@ -682,15 +700,30 @@ async def generate_study_guide(
     else:
         # Translate the approved guide. A translation failure is worth surfacing
         # rather than silently handing back English text to an Amharic reader.
-        translated = await _translate_guide(english_payload, language.code, native_passage)
+        translated = None
+        verdict = None
+        feedback = None
+        # Two attempts: the second is worth it because the English guide is already
+        # cached, so a retry costs only the translation call.
+        for _attempt in range(2):
+            translated = await _translate_guide(
+                english_payload, language.code, native_passage, feedback=feedback
+            )
+            if translated is None:
+                break
+            verdict = _check_translated_guide(translated)
+            if verdict.ok:
+                break
+            feedback = verdict.summary
+            print(f"[study_guide] retrying {language.code} translation: {feedback}")
+
         if translated is None:
             raise _guide_error(
                 502, "TRANSLATION_FAILED",
                 f"The guide was generated but could not be translated into {language.code}.",
                 "Retry in a moment; the English guide is cached so this is fast.",
             )
-        verdict = _check_translated_guide(translated)
-        if not verdict.ok:
+        if verdict is not None and not verdict.ok:
             raise _guide_error(
                 502, "TRANSLATION_INVALID",
                 f"Translation into {language.code} did not survive validation.",
